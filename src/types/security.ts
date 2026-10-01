@@ -89,6 +89,7 @@ export interface PortItem {
   risk: 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW';
   process: string;
   description: string;
+  isCustom?: boolean;
 }
 
 export interface HardwareState {

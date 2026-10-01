@@ -17,16 +17,10 @@ import { useSecurity } from '../context/SecurityContext';
 import { HardwareState } from '../types/security';
 
 export const HardwareControl: React.FC = () => {
-  const { hardware, toggleHardware, targetOS } = useSecurity();
-  const [loadingDevice, setLoadingDevice] = React.useState<keyof HardwareState | null>(null);
+  const { hardware, toggleHardware, loadingHardwareDevice, targetOS } = useSecurity();
 
   const handleHardwareToggle = async (device: keyof HardwareState) => {
-    setLoadingDevice(device);
-    try {
-      await toggleHardware(device);
-    } finally {
-      setLoadingDevice(null);
-    }
+    await toggleHardware(device);
   };
 
   const hardwareItems = [
@@ -152,12 +146,12 @@ export const HardwareControl: React.FC = () => {
                   <button
                     onClick={() => handleHardwareToggle(item.id)}
                     title={item.isLocked ? 'Click to UNLOCK hardware' : 'Click to LOCK hardware'}
-                    disabled={loadingDevice === item.id}
+                    disabled={loadingHardwareDevice === item.id}
                     className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
                       item.isLocked ? 'bg-emerald-600' : 'bg-slate-700'
-                    } ${loadingDevice === item.id ? 'opacity-70 cursor-not-allowed' : ''}`}
+                    } ${loadingHardwareDevice === item.id ? 'opacity-70 cursor-not-allowed' : ''}`}
                   >
-                    {loadingDevice === item.id ? (
+                    {loadingHardwareDevice === item.id ? (
                       <span className="absolute inset-0 flex items-center justify-center">
                         <span className="h-3 w-3 animate-spin rounded-full border-2 border-white/30 border-t-white" />
                       </span>

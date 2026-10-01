@@ -48,6 +48,7 @@ export const CommandCenter: React.FC<CommandCenterProps> = ({ onNavigate }) => {
     scanPorts,
     togglePort,
     toggleHardware,
+    loadingHardwareDevice,
     executeHardening,
     executeRollback,
   } = useSecurity();
@@ -351,10 +352,16 @@ export const CommandCenter: React.FC<CommandCenterProps> = ({ onNavigate }) => {
 
               <button
                 onClick={() => toggleHardware('camera')}
+                disabled={loadingHardwareDevice === 'camera'}
                 className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
                   hardware.camera ? 'bg-emerald-600' : 'bg-slate-700'
-                }`}
+                } ${loadingHardwareDevice === 'camera' ? 'opacity-70 cursor-wait' : ''}`}
               >
+                {loadingHardwareDevice === 'camera' ? (
+                  <span className="absolute inset-0 flex items-center justify-center">
+                    <span className="h-3 w-3 animate-spin rounded-full border-2 border-white/30 border-t-white" />
+                  </span>
+                ) : null}
                 <span
                   className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
                     hardware.camera ? 'translate-x-5' : 'translate-x-0'
@@ -379,10 +386,16 @@ export const CommandCenter: React.FC<CommandCenterProps> = ({ onNavigate }) => {
 
               <button
                 onClick={() => toggleHardware('microphone')}
+                disabled={loadingHardwareDevice === 'microphone'}
                 className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
                   hardware.microphone ? 'bg-emerald-600' : 'bg-slate-700'
-                }`}
+                } ${loadingHardwareDevice === 'microphone' ? 'opacity-70 cursor-wait' : ''}`}
               >
+                {loadingHardwareDevice === 'microphone' ? (
+                  <span className="absolute inset-0 flex items-center justify-center">
+                    <span className="h-3 w-3 animate-spin rounded-full border-2 border-white/30 border-t-white" />
+                  </span>
+                ) : null}
                 <span
                   className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
                     hardware.microphone ? 'translate-x-5' : 'translate-x-0'
@@ -407,10 +420,16 @@ export const CommandCenter: React.FC<CommandCenterProps> = ({ onNavigate }) => {
 
               <button
                 onClick={() => toggleHardware('usbStorage')}
+                disabled={loadingHardwareDevice === 'usbStorage'}
                 className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
                   hardware.usbStorage ? 'bg-emerald-600' : 'bg-slate-700'
-                }`}
+                } ${loadingHardwareDevice === 'usbStorage' ? 'opacity-70 cursor-wait' : ''}`}
               >
+                {loadingHardwareDevice === 'usbStorage' ? (
+                  <span className="absolute inset-0 flex items-center justify-center">
+                    <span className="h-3 w-3 animate-spin rounded-full border-2 border-white/30 border-t-white" />
+                  </span>
+                ) : null}
                 <span
                   className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
                     hardware.usbStorage ? 'translate-x-5' : 'translate-x-0'
