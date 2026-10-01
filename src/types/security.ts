@@ -50,6 +50,21 @@ export interface ZeroTrustPrinciple {
   recommendations: string[];
 }
 
+export interface TemporaryAppLease {
+  id: string; // 'zoom', 'teams', 'meet', 'scanner', 'audio', 'vite', 'debugger', 'ssh', 'rdp', 'smb', 'custom'
+  appName: string;
+  shortName: string;
+  resourceType: 'CONFERENCE' | 'CAMERA' | 'MIC' | 'PORT';
+  underlyingResource: string;
+  totalSeconds: number;
+  remainingSeconds: number;
+  justification: string;
+  startedAt: string;
+  expiresAt: string;
+  portsUnlocked?: number[];
+  devicesUnlocked?: (keyof HardwareState)[];
+}
+
 export interface PamRequestLog {
   id: string;
   timestamp: string;
@@ -128,6 +143,10 @@ export interface BackgroundProcess {
   type: 'TELEMETRY' | 'UPDATER' | 'SYSTEM' | 'CUSTOM';
   isBlocked: boolean; // true = Blocked, false = Allowed
   impact: string;
+  company?: string;
+  description?: string;
+  hasActiveSocket?: boolean;
+  socketInfo?: string;
 }
 
 export interface RecurringScanSchedule {

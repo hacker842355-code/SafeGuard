@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { 
   KeyRound, 
   ShieldCheck, 
@@ -17,9 +17,13 @@ import {
   FolderSync,
   Info,
   SlidersHorizontal,
-  X
+  X,
+  Loader2,
+  LayoutGrid,
+  FileCheck2
 } from 'lucide-react';
-import { PamRequestLog } from '../types/security';
+import { useSecurity } from '../context/SecurityContext';
+import TemporaryAppPermissions from './TemporaryAppPermissions';
 
 interface AppPreset {
   id: string;
@@ -161,26 +165,16 @@ const APP_PRESETS: AppPreset[] = [
 ];
 
 export const PamSimulator: React.FC = () => {
-  // State for active grant
-  const [activeGrant, setActiveGrant] = useState<{
-    appName: string;
-    resourceType: 'PORT' | 'CAMERA' | 'MIC' | 'CONFERENCE';
-    underlyingResource: string;
-    totalSeconds: number;
-    remainingSeconds: number;
-    justification: string;
-    startedAt: string;
-  } | null>({
-    appName: 'Zoom Meeting',
-    resourceType: 'CONFERENCE',
-    underlyingResource: 'Webcam + Microphone',
-    totalSeconds: 1800,
-    remainingSeconds: 1540,
-    justification: 'Executive security architecture review call',
-    startedAt: new Date(Date.now() - 260000).toLocaleTimeString(),
-  });
+  const {
+    activeLease,
+    isLeaseLoading,
+    leaseLedger,
+    grantTemporaryLease,
+    revokeTemporaryLease,
+  } = useSecurity();
 
   const [selectedAppId, setSelectedAppId] = useState<string>('zoom');
+  const [viewMode, setViewMode] = useState<'console' | 'executive'>('console');
   const [customPortNumber, setCustomPortNumber] = useState<string>('');
   const [customPortName, setCustomPortName] = useState<string>('');
   const [durationMinutes, setDurationMinutes] = useState<number>(30);
@@ -189,84 +183,7 @@ export const PamSimulator: React.FC = () => {
 
   const selectedPreset = APP_PRESETS.find((a) => a.id === selectedAppId) || APP_PRESETS[0];
 
-  // Audit Logs (tamper-evident hash chain simulation)
-  const [auditLogs, setAuditLogs] = useState<PamRequestLog[]>([
-    {
-      id: 'LOG-8841',
-      timestamp: '11:02:14 UTC',
-      actor: 'SecOps-Admin (UID 1000)',
-      actionType: 'CAMERA_ENABLE',
-      target: 'Zoom Meeting (Webcam + Microphone)',
-      durationMinutes: 30,
-      expiresAt: '11:32:14 UTC',
-      justification: 'Executive security architecture review call',
-      status: 'ACTIVE',
-      cryptoSignature: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
-    },
-    {
-      id: 'LOG-8840',
-      timestamp: '10:15:00 UTC',
-      actor: 'Developer (UID 1004)',
-      actionType: 'PORT_OPEN',
-      target: 'VS Code & Vite Web Server (Port 8000)',
-      durationMinutes: 30,
-      expiresAt: '10:45:00 UTC',
-      justification: 'Frontend UI layout preview',
-      status: 'EXPIRED',
-      cryptoSignature: 'ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb',
-    },
-    {
-      id: 'LOG-8839',
-      timestamp: '09:12:44 UTC',
-      actor: 'Suspicious-Agent (PID 4912)',
-      actionType: 'PORT_OPEN',
-      target: 'Windows Shared Drive (Port 445 SMB)',
-      durationMinutes: 60,
-      expiresAt: 'Blocked',
-      justification: 'Automated Windows Update helper',
-      status: 'BLOCKED_SUSPICIOUS',
-      cryptoSignature: '4e07408562bedb8b60ce05c1decfe3ad16b72230967de01f640b7e4729b49fce',
-      threatWarning: 'P2 High-Risk Port Veto: Request blocked by Zero-Trust policy.',
-    },
-  ]);
-
-  // Countdown timer effect
-  useEffect(() => {
-    if (!activeGrant) return;
-    const interval = setInterval(() => {
-      setActiveGrant((prev) => {
-        if (!prev) return null;
-        if (prev.remainingSeconds <= 1) {
-          // Grant expired: add log
-          addLogEntry({
-            id: `LOG-${Math.floor(1000 + Math.random() * 9000)}`,
-            timestamp: new Date().toLocaleTimeString() + ' UTC',
-            actor: 'System Watchdog',
-            actionType: prev.resourceType === 'PORT' ? 'PORT_CLOSE' : 'CAMERA_DISABLE',
-            target: `${prev.appName} (${prev.underlyingResource})`,
-            durationMinutes: prev.totalSeconds / 60,
-            expiresAt: 'Expired & Auto-Locked',
-            justification: 'Monotonic timer zero reached -> Re-enforced default deny',
-            status: 'EXPIRED',
-            cryptoSignature: Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15),
-          });
-          return null;
-        }
-        return {
-          ...prev,
-          remainingSeconds: prev.remainingSeconds - 1,
-        };
-      });
-    }, 1000);
-
-    return () => clearInterval(interval);
-  }, [activeGrant]);
-
-  const addLogEntry = (entry: PamRequestLog) => {
-    setAuditLogs((prev) => [entry, ...prev]);
-  };
-
-  const handleGrantRequest = (e: React.FormEvent) => {
+  const handleGrantRequest = async (e: React.FormEvent) => {
     e.preventDefault();
 
     // Check for high-risk presets (SMB or RDP)
@@ -275,69 +192,27 @@ export const PamSimulator: React.FC = () => {
       return;
     }
 
-    const durationSec = durationMinutes * 60;
     const displayName =
       selectedPreset.id === 'custom_port'
         ? `${customPortName || 'Custom App'} (Port ${customPortNumber || '?'})`
         : selectedPreset.appName;
 
-    const resourceSummary =
-      selectedPreset.id === 'custom_port'
-        ? `TCP Port ${customPortNumber || '?'}`
-        : selectedPreset.underlyingResource;
-
-    const newGrant = {
-      appName: displayName,
-      resourceType: selectedPreset.resourceType,
-      underlyingResource: resourceSummary,
-      totalSeconds: durationSec,
-      remainingSeconds: durationSec,
-      justification: justification.trim() || `User requested temporary access for ${displayName}`,
-      startedAt: new Date().toLocaleTimeString(),
-    };
-
-    setActiveGrant(newGrant);
-
-    addLogEntry({
-      id: `LOG-${Math.floor(1000 + Math.random() * 9000)}`,
-      timestamp: new Date().toLocaleTimeString() + ' UTC',
-      actor: 'SecOps-Admin (UID 1000)',
-      actionType:
-        selectedPreset.resourceType === 'PORT'
-          ? 'PORT_OPEN'
-          : selectedPreset.resourceType === 'MIC'
-          ? 'MIC_ENABLE'
-          : 'CAMERA_ENABLE',
-      target: `${displayName} (${resourceSummary})`,
+    await grantTemporaryLease({
+      appId: selectedPreset.id === 'custom_port' ? 'custom' : selectedPreset.id,
+      label: selectedPreset.permissionDetails,
+      shortName: displayName,
+      icon: selectedPreset.resourceType === 'PORT' ? '💻' : '📹',
       durationMinutes,
-      expiresAt: new Date(Date.now() + durationSec * 1000).toLocaleTimeString() + ' UTC',
-      justification: newGrant.justification,
-      status: 'ACTIVE',
-      cryptoSignature: Array.from(crypto.getRandomValues(new Uint8Array(16)))
-        .map((b) => b.toString(16).padStart(2, '0'))
-        .join(''),
+      reason: justification.trim() || `User requested temporary access for ${displayName}`,
+      customPort: selectedPreset.id === 'custom_port' ? Number(customPortNumber) : undefined,
     });
 
     setJustification('');
   };
 
-  const handleRevokeNow = () => {
-    if (!activeGrant) return;
-    addLogEntry({
-      id: `LOG-${Math.floor(1000 + Math.random() * 9000)}`,
-      timestamp: new Date().toLocaleTimeString() + ' UTC',
-      actor: 'SecOps-Admin (Manual Revoke)',
-      actionType: activeGrant.resourceType === 'PORT' ? 'PORT_CLOSE' : 'CAMERA_DISABLE',
-      target: `${activeGrant.appName} (${activeGrant.underlyingResource})`,
-      durationMinutes: 0,
-      expiresAt: 'Revoked Early',
-      justification: 'Manual emergency lockdown executed by user',
-      status: 'REVOKED',
-      cryptoSignature: Array.from(crypto.getRandomValues(new Uint8Array(16)))
-        .map((b) => b.toString(16).padStart(2, '0'))
-        .join(''),
-    });
-    setActiveGrant(null);
+  const handleRevokeNow = async () => {
+    if (!activeLease) return;
+    await revokeTemporaryLease();
   };
 
   const formatTime = (seconds: number) => {
@@ -346,20 +221,58 @@ export const PamSimulator: React.FC = () => {
     return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   };
 
-  const percentLeft = activeGrant
-    ? Math.round((activeGrant.remainingSeconds / activeGrant.totalSeconds) * 100)
+  const percentLeft = activeLease && activeLease.totalSeconds > 0
+    ? Math.round((activeLease.remainingSeconds / activeLease.totalSeconds) * 100)
     : 0;
+
+  if (viewMode === 'executive') {
+    return (
+      <div className="space-y-4">
+        <div className="flex items-center justify-between bg-slate-900/80 border border-slate-800 rounded-lg p-3">
+          <div className="text-xs text-slate-300">
+            Viewing: <span className="font-semibold text-emerald-400">Executive Audit Document Layout</span>
+          </div>
+          <button
+            onClick={() => setViewMode('console')}
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-cyan-400 text-xs font-semibold rounded-md border border-slate-700 transition-colors"
+          >
+            <LayoutGrid className="w-3.5 h-3.5" />
+            <span>Switch to Dark Security Console</span>
+          </button>
+        </div>
+        <TemporaryAppPermissions />
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">
-      {/* Header */}
-      <div>
-        <h2 className="text-xl sm:text-2xl font-bold tracking-tight text-white font-sans">
-          Temporary App Permissions
-        </h2>
-        <p className="text-xs text-slate-400 mt-0.5">
-          Grant temporary 15, 30, or 60-minute access for Zoom, Teams, or developer tools with automatic timer lockdown.
-        </p>
+      {/* Header with View Toggle */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div>
+          <h2 className="text-xl sm:text-2xl font-bold tracking-tight text-white font-sans">
+            Temporary App Permissions
+          </h2>
+          <p className="text-xs text-slate-400 mt-0.5">
+            Grant temporary 15, 30, or 60-minute access for Zoom, Teams, or developer tools with automatic timer lockdown.
+          </p>
+        </div>
+        <div className="flex items-center gap-1 bg-slate-900 border border-slate-800 p-1 rounded-lg shrink-0">
+          <button
+            onClick={() => setViewMode('console')}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md bg-slate-800 text-cyan-400 shadow-sm transition-colors"
+          >
+            <LayoutGrid className="w-3.5 h-3.5" />
+            <span>Console View</span>
+          </button>
+          <button
+            onClick={() => setViewMode('executive')}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md text-slate-400 hover:text-slate-200 transition-colors"
+          >
+            <FileCheck2 className="w-3.5 h-3.5 text-emerald-400" />
+            <span>Executive View</span>
+          </button>
+        </div>
       </div>
 
       {/* Active Grant Status Banner */}
@@ -372,25 +285,25 @@ export const PamSimulator: React.FC = () => {
               </span>
               <span
                 className={`text-xs px-2.5 py-0.5 rounded font-mono font-semibold ${
-                  activeGrant
+                  activeLease
                     ? 'bg-amber-500/10 text-amber-300 border border-amber-500/30'
                     : 'bg-emerald-500/10 text-emerald-300 border border-emerald-500/30'
                 }`}
               >
-                {activeGrant ? 'TEMPORARY ACCESS ACTIVE' : 'FULL SYSTEM LOCKDOWN (NO ACCESS)'}
+                {activeLease ? 'TEMPORARY ACCESS ACTIVE' : 'FULL SYSTEM LOCKDOWN (NO ACCESS)'}
               </span>
             </div>
 
-            {activeGrant ? (
+            {activeLease ? (
               <div>
                 <h3 className="text-lg font-bold text-white font-sans flex items-center gap-2">
-                  <span>{activeGrant.appName}</span>
+                  <span>{activeLease.shortName}</span>
                   <span className="text-xs font-normal text-slate-400 font-mono">
-                    ({activeGrant.underlyingResource})
+                    ({activeLease.label})
                   </span>
                 </h3>
                 <p className="text-xs text-slate-400 mt-0.5">
-                  Justification: <span className="text-slate-300 italic">"{activeGrant.justification}"</span>
+                  Justification: <span className="text-slate-300 italic">"{activeLease.reason}"</span>
                 </p>
               </div>
             ) : (
@@ -405,7 +318,7 @@ export const PamSimulator: React.FC = () => {
             )}
           </div>
 
-          {activeGrant && (
+          {activeLease && (
             <div className="flex items-center gap-6 shrink-0 bg-slate-950/70 p-4 rounded-xl border border-slate-800">
               <div className="text-right">
                 <div className="text-xs text-slate-400 flex items-center gap-1 justify-end font-mono">
@@ -413,7 +326,7 @@ export const PamSimulator: React.FC = () => {
                   <span>Remaining Time</span>
                 </div>
                 <div className="text-2xl font-mono font-bold text-cyan-400 tabular-nums">
-                  {formatTime(activeGrant.remainingSeconds)}
+                  {formatTime(activeLease.remainingSeconds)}
                 </div>
                 <div className="text-[11px] text-slate-500 font-mono">
                   {percentLeft}% of lease remaining
@@ -422,9 +335,11 @@ export const PamSimulator: React.FC = () => {
 
               <button
                 onClick={handleRevokeNow}
-                className="px-4 py-2 bg-red-600 hover:bg-red-500 text-white font-semibold text-xs rounded-lg transition-colors shadow-sm whitespace-nowrap"
+                disabled={isLeaseLoading}
+                className="px-4 py-2 bg-red-600 hover:bg-red-500 disabled:opacity-50 text-white font-semibold text-xs rounded-lg transition-colors shadow-sm whitespace-nowrap flex items-center gap-1.5"
               >
-                Revoke & Lock Now
+                {isLeaseLoading && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                <span>Revoke &amp; Lock Now</span>
               </button>
             </div>
           )}
@@ -562,9 +477,11 @@ export const PamSimulator: React.FC = () => {
 
               <button
                 type="submit"
-                className="px-5 py-2.5 bg-cyan-600 hover:bg-cyan-500 text-slate-950 font-bold text-xs rounded-lg transition-colors whitespace-nowrap shadow-sm"
+                disabled={isLeaseLoading}
+                className="px-5 py-2.5 bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 text-slate-950 font-bold text-xs rounded-lg transition-colors whitespace-nowrap shadow-sm flex items-center gap-1.5"
               >
-                Authorize {selectedPreset.appName} ({durationMinutes}m)
+                {isLeaseLoading && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                <span>Authorize {selectedPreset.appName} ({durationMinutes}m)</span>
               </button>
             </div>
           </form>
@@ -658,24 +575,7 @@ export const PamSimulator: React.FC = () => {
 
             <div className="flex items-center justify-end gap-3 pt-2">
               <button
-                onClick={() => {
-                  setSocialEngineeringModal(false);
-                  addLogEntry({
-                    id: `LOG-${Math.floor(1000 + Math.random() * 9000)}`,
-                    timestamp: new Date().toLocaleTimeString() + ' UTC',
-                    actor: 'SecOps-Admin (UID 1000)',
-                    actionType: 'PORT_OPEN',
-                    target: `${selectedPreset.appName} (${selectedPreset.underlyingResource})`,
-                    durationMinutes: 0,
-                    expiresAt: 'Blocked',
-                    justification: 'Attempted high-risk grant - Vetoed by Zero-Trust policy',
-                    status: 'BLOCKED_SUSPICIOUS',
-                    cryptoSignature: Array.from(crypto.getRandomValues(new Uint8Array(16)))
-                      .map((b) => b.toString(16).padStart(2, '0'))
-                      .join(''),
-                    threatWarning: 'High-risk protocol vetoed.',
-                  });
-                }}
+                onClick={() => setSocialEngineeringModal(false)}
                 className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold rounded-lg transition-colors"
               >
                 Acknowledge & Close
@@ -695,7 +595,7 @@ export const PamSimulator: React.FC = () => {
             </h3>
           </div>
           <span className="text-xs font-mono text-slate-400">
-            {auditLogs.length} Journal Entries
+            {leaseLedger.length} Journal Entries
           </span>
         </div>
 
@@ -712,7 +612,7 @@ export const PamSimulator: React.FC = () => {
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-800/60 font-sans">
-              {auditLogs.map((log) => (
+              {leaseLedger.map((log) => (
                 <tr key={log.id} className="hover:bg-slate-800/30 transition-colors">
                   <td className="py-3 px-4 font-mono text-cyan-400 font-semibold whitespace-nowrap">
                     {log.id}
@@ -721,13 +621,13 @@ export const PamSimulator: React.FC = () => {
                     {log.timestamp}
                   </td>
                   <td className="py-3 px-4">
-                    <div className="text-slate-200 font-medium">{log.target}</div>
+                    <div className="text-slate-200 font-medium">{log.app}</div>
                     <div className="text-slate-500 text-[11px] truncate max-w-xs">
-                      {log.justification}
+                      {log.reason}
                     </div>
                   </td>
                   <td className="py-3 px-4 font-mono text-slate-300 whitespace-nowrap">
-                    {log.durationMinutes > 0 ? `${log.durationMinutes} min` : 'N/A'}
+                    {log.duration}
                   </td>
                   <td className="py-3 px-4 whitespace-nowrap">
                     <span
@@ -745,7 +645,7 @@ export const PamSimulator: React.FC = () => {
                     </span>
                   </td>
                   <td className="py-3 px-4 font-mono text-[11px] text-slate-500 max-w-[160px] truncate">
-                    {log.cryptoSignature}
+                    {log.hash}
                   </td>
                 </tr>
               ))}

@@ -1,5 +1,6 @@
 import React from 'react';
 import { Shield, ShieldAlert, FileText } from 'lucide-react';
+import { useSecurity } from '../context/SecurityContext';
 
 interface TopBarProps {
   activeTab: string;
@@ -16,6 +17,8 @@ export const TopBar: React.FC<TopBarProps> = ({
   onEmergencyLock,
   isLockedDown,
 }) => {
+  const { activeLease } = useSecurity();
+
   const navItems = [
     { id: 'dashboard', label: 'Overview' },
     { id: 'processes', label: 'Process Blocker' },
@@ -46,13 +49,16 @@ export const TopBar: React.FC<TopBarProps> = ({
             <button
               key={item.id}
               onClick={() => setActiveTab(item.id)}
-              className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap ${
+              className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap flex items-center gap-1.5 ${
                 activeTab === item.id
                   ? 'bg-slate-800 text-cyan-400 shadow-sm'
                   : 'text-slate-400 hover:text-slate-200'
               }`}
             >
-              {item.label}
+              <span>{item.label}</span>
+              {item.id === 'pam' && activeLease && (
+                <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" title="Temporary Access Active" />
+              )}
             </button>
           ))}
         </nav>
