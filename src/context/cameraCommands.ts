@@ -1,0 +1,5 @@
+export const cameraCommands = {
+  name: 'Webcam Video Camera',
+  lock: `Set-ItemProperty -Path "HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\CapabilityAccessManager\\ConsentStore\\webcam" -Name "Value" -Value "Deny" -Force; Set-ItemProperty -Path "HKCU:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\CapabilityAccessManager\\ConsentStore\\webcam" -Name "Value" -Value "Deny" -Force; Get-PnpDevice -Class Camera,Image -ErrorAction SilentlyContinue | Disable-PnpDevice -Confirm:$false`,
+  unlock: `Set-ItemProperty -Path "HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\CapabilityAccessManager\\ConsentStore\\webcam" -Name "Value" -Value "Allow" -Force; Set-ItemProperty -Path "HKCU:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\CapabilityAccessManager\\ConsentStore\\webcam" -Name "Value" -Value "Allow" -Force; Get-PnpDevice -Class Camera,Image -ErrorAction SilentlyContinue | Enable-PnpDevice -Confirm:$false`,
+};
