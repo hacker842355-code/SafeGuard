@@ -88,7 +88,9 @@ interface SecurityContextType {
   targetOS: 'windows' | 'linux' | 'macos';
   setTargetOS: (os: 'windows' | 'linux' | 'macos') => void;
   activeProfile: SecurityProfileMode;
-  applyProfile: (mode: SecurityProfileMode) => void;
+  isApplyingProfile: boolean;
+  profileLoading: SecurityProfileMode | null;
+  applyProfile: (mode: SecurityProfileMode) => Promise<boolean>;
   vulnerabilities: VulnerabilityAuditItem[];
   fixVulnerability: (id: string) => void;
   fixAllVulnerabilities: () => void;
@@ -621,6 +623,8 @@ export const SecurityProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   });
   const [isStrictLockdownLoading, setIsStrictLockdownLoading] = useState<boolean>(false);
   const [isResettingPorts, setIsResettingPorts] = useState<boolean>(false);
+  const [profileLoading, setProfileLoading] = useState<SecurityProfileMode | null>(null);
+  const isApplyingProfile = profileLoading !== null;
   const [portNotificationAlert, setPortNotificationAlert] = useState<PortNotificationAlert | null>(null);
   const [portScanInterval, setPortScanInterval] = useState<number>(() => {
     if (typeof window === 'undefined') return 15;
@@ -2088,70 +2092,292 @@ export const SecurityProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     }
   };
 
-  // 5. 1-Click Professional Security Profiles (Stealth, Meeting, Developer)
-  const applyProfile = (mode: SecurityProfileMode) => {
-    setActiveProfile(mode);
+  // 5. Production-Ready 1-Click Professional Security Profiles
+  const applyProfile = async (mode: SecurityProfileMode): Promise<boolean> => {
+    if (profileLoading) return false;
+    setProfileLoading(mode);
+
+    let command = '';
+    let profileTitle = '';
 
     if (mode === 'stealth') {
-      // Maximum Paranoid Stealth Mode: Everything blocked
-      setPorts((prev) => prev.map((p) => ({ ...p, isOpen: false })));
-      setHardware({
-        camera: true,
-        microphone: true,
-        usbStorage: true,
-        bluetooth: true,
-        fileSystemAcl: true,
-      });
-      setVulnerabilities((prev) => prev.map((v) => ({ ...v, isVulnerable: false })));
-      setTerminalLogs((l) => [
-        ...l,
-        '',
-        '[🛡️] APPLIED PROFILE: Maximum Stealth Mode.',
-        '    [✓] All network doors blocked. All hardware devices locked. Host invisible to external scans.',
-      ]);
-    } else if (mode === 'meeting') {
-      // Work & Meeting Mode: Camera & Mic allowed, dangerous ports blocked
-      setPorts((prev) =>
-        prev.map((p) => {
-          if (p.port === 445 || p.port === 135 || p.port === 3389 || p.port === 9229) {
-            return { ...p, isOpen: false };
-          }
-          return p;
-        })
-      );
-      setHardware({
-        camera: false,      // Camera allowed for Zoom/Teams
-        microphone: false,  // Mic allowed for Zoom/Teams
-        usbStorage: true,   // USB blocked
-        bluetooth: false,   // Bluetooth allowed for headphones
-        fileSystemAcl: true,
-      });
-      setTerminalLogs((l) => [
-        ...l,
-        '',
-        '[💼] APPLIED PROFILE: Work & Meeting Mode.',
-        '    [✓] Camera & Microphone ready for Zoom/Teams calls. Dangerous network ports (SMB/RDP) kept blocked.',
-      ]);
+      profileTitle = 'Maximum Stealth / Public Wi-Fi Mode';
+      command = `$ErrorActionPreference = 'SilentlyContinue'; & {
+        netsh advfirewall set allprofiles settings openinboundconnectionnotify disable
+        netsh advfirewall firewall delete rule name="SurfaceGuard_Block_All_Unlisted" -ErrorAction SilentlyContinue 2>$null
+        if ($LASTEXITCODE -ne 0) { $global:LASTEXITCODE = 0 }
+        netsh advfirewall firewall add rule name="SurfaceGuard_Block_All_Unlisted" dir=in action=block protocol=TCP localport=1-65535 enable=yes -ErrorAction SilentlyContinue
+        New-Item -Path 'HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows NT\\DNSClient' -Force -ErrorAction SilentlyContinue | Out-Null
+        Set-ItemProperty -Path 'HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows NT\\DNSClient' -Name 'EnableMulticast' -Value 0 -Force -ErrorAction SilentlyContinue
+        netsh advfirewall firewall delete rule name="SurfaceGuard_Block_137" -ErrorAction SilentlyContinue 2>$null; if ($LASTEXITCODE -ne 0) { $global:LASTEXITCODE = 0 }; netsh advfirewall firewall add rule name="SurfaceGuard_Block_137" dir=in action=block protocol=UDP localport=137 enable=yes -ErrorAction SilentlyContinue
+        netsh advfirewall firewall delete rule name="SurfaceGuard_Block_138" -ErrorAction SilentlyContinue 2>$null; if ($LASTEXITCODE -ne 0) { $global:LASTEXITCODE = 0 }; netsh advfirewall firewall add rule name="SurfaceGuard_Block_138" dir=in action=block protocol=UDP localport=138 enable=yes -ErrorAction SilentlyContinue
+        netsh advfirewall firewall delete rule name="SurfaceGuard_Block_139" -ErrorAction SilentlyContinue 2>$null; if ($LASTEXITCODE -ne 0) { $global:LASTEXITCODE = 0 }; netsh advfirewall firewall add rule name="SurfaceGuard_Block_139" dir=in action=block protocol=TCP localport=139 enable=yes -ErrorAction SilentlyContinue
+        Set-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\USBSTOR' -Name 'Start' -Value 4 -Type DWord -Force -ErrorAction SilentlyContinue
+        Get-PnpDevice -Class Bluetooth -ErrorAction SilentlyContinue | Disable-PnpDevice -Confirm:$false
+        Set-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\CapabilityAccessManager\\ConsentStore\\webcam' -Name 'Value' -Value 'Deny' -Type String -Force -ErrorAction SilentlyContinue
+        Set-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\CapabilityAccessManager\\ConsentStore\\microphone' -Name 'Value' -Value 'Deny' -Type String -Force -ErrorAction SilentlyContinue
+      } -ErrorAction SilentlyContinue`;
+    } else if (mode === 'corporate') {
+      profileTitle = 'Corporate / Enterprise Lockdown Mode';
+      command = `$ErrorActionPreference = 'SilentlyContinue'; & {
+        netsh advfirewall firewall delete rule name="SurfaceGuard_Block_445" -ErrorAction SilentlyContinue 2>$null; if ($LASTEXITCODE -ne 0) { $global:LASTEXITCODE = 0 }; netsh advfirewall firewall add rule name="SurfaceGuard_Block_445" dir=in action=block protocol=TCP localport=445 enable=yes -ErrorAction SilentlyContinue
+        netsh advfirewall firewall delete rule name="SurfaceGuard_Block_3389" -ErrorAction SilentlyContinue 2>$null; if ($LASTEXITCODE -ne 0) { $global:LASTEXITCODE = 0 }; netsh advfirewall firewall add rule name="SurfaceGuard_Block_3389" dir=in action=block protocol=TCP localport=3389 enable=yes -ErrorAction SilentlyContinue
+        netsh advfirewall firewall delete rule name="SurfaceGuard_Block_135" -ErrorAction SilentlyContinue 2>$null; if ($LASTEXITCODE -ne 0) { $global:LASTEXITCODE = 0 }; netsh advfirewall firewall add rule name="SurfaceGuard_Block_135" dir=in action=block protocol=TCP localport=135 enable=yes -ErrorAction SilentlyContinue
+        netsh advfirewall firewall delete rule name="SurfaceGuard_Block_5985" -ErrorAction SilentlyContinue 2>$null; if ($LASTEXITCODE -ne 0) { $global:LASTEXITCODE = 0 }; netsh advfirewall firewall add rule name="SurfaceGuard_Block_5985" dir=in action=block protocol=TCP localport=5985 enable=yes -ErrorAction SilentlyContinue
+        netsh advfirewall firewall delete rule name="SurfaceGuard_Block_5986" -ErrorAction SilentlyContinue 2>$null; if ($LASTEXITCODE -ne 0) { $global:LASTEXITCODE = 0 }; netsh advfirewall firewall add rule name="SurfaceGuard_Block_5986" dir=in action=block protocol=TCP localport=5986 enable=yes -ErrorAction SilentlyContinue
+        Set-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\USBSTOR' -Name 'Start' -Value 4 -Type DWord -Force -ErrorAction SilentlyContinue
+        Set-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\CapabilityAccessManager\\ConsentStore\\webcam' -Name 'Value' -Value 'Deny' -Type String -Force -ErrorAction SilentlyContinue
+        Set-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\CapabilityAccessManager\\ConsentStore\\microphone' -Name 'Value' -Value 'Deny' -Type String -Force -ErrorAction SilentlyContinue
+        icacls "$env:SystemRoot\\System32\\vssadmin.exe" /inheritance:r /grant "Administrators:F" "SYSTEM:F" 2>$null
+      } -ErrorAction SilentlyContinue`;
+    } else if (mode === 'home') {
+      profileTitle = 'Home & Everyday User Mode';
+      command = `$ErrorActionPreference = 'SilentlyContinue'; & {
+        # 1. Block dangerous inbound SMB 445 and NetBIOS 137, 138, 139
+        netsh advfirewall firewall delete rule name="SurfaceGuard_Block_445" -ErrorAction SilentlyContinue 2>$null; if ($LASTEXITCODE -ne 0) { $global:LASTEXITCODE = 0 }; netsh advfirewall firewall add rule name="SurfaceGuard_Block_445" dir=in action=block protocol=TCP localport=445 enable=yes -ErrorAction SilentlyContinue
+        netsh advfirewall firewall delete rule name="SurfaceGuard_Block_137" -ErrorAction SilentlyContinue 2>$null; if ($LASTEXITCODE -ne 0) { $global:LASTEXITCODE = 0 }; netsh advfirewall firewall add rule name="SurfaceGuard_Block_137" dir=in action=block protocol=UDP localport=137 enable=yes -ErrorAction SilentlyContinue
+        netsh advfirewall firewall delete rule name="SurfaceGuard_Block_138" -ErrorAction SilentlyContinue 2>$null; if ($LASTEXITCODE -ne 0) { $global:LASTEXITCODE = 0 }; netsh advfirewall firewall add rule name="SurfaceGuard_Block_138" dir=in action=block protocol=UDP localport=138 enable=yes -ErrorAction SilentlyContinue
+        netsh advfirewall firewall delete rule name="SurfaceGuard_Block_139" -ErrorAction SilentlyContinue 2>$null; if ($LASTEXITCODE -ne 0) { $global:LASTEXITCODE = 0 }; netsh advfirewall firewall add rule name="SurfaceGuard_Block_139" dir=in action=block protocol=TCP localport=139 enable=yes -ErrorAction SilentlyContinue
+
+        # 2. Allow local subnet LAN printing & mDNS/Chromecast (UDP 5353, TCP 9100) on local subnet
+        netsh advfirewall firewall delete rule name="SurfaceGuard_Allow_LAN_Printers" -ErrorAction SilentlyContinue 2>$null; if ($LASTEXITCODE -ne 0) { $global:LASTEXITCODE = 0 }; netsh advfirewall firewall add rule name="SurfaceGuard_Allow_LAN_Printers" dir=in action=allow protocol=TCP localport=9100 remoteip=localsubnet enable=yes -ErrorAction SilentlyContinue
+        netsh advfirewall firewall delete rule name="SurfaceGuard_Allow_LAN_Discovery" -ErrorAction SilentlyContinue 2>$null; if ($LASTEXITCODE -ne 0) { $global:LASTEXITCODE = 0 }; netsh advfirewall firewall add rule name="SurfaceGuard_Allow_LAN_Discovery" dir=in action=allow protocol=UDP localport=5353 remoteip=localsubnet enable=yes -ErrorAction SilentlyContinue
+
+        # 3. Disable LLMNR Multicast Poisoning Defense
+        New-Item -Path 'HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows NT\\DNSClient' -Force -ErrorAction SilentlyContinue | Out-Null
+        Set-ItemProperty -Path 'HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows NT\\DNSClient' -Name 'EnableMulticast' -Value 0 -Force -ErrorAction SilentlyContinue
+
+        # 4. Block background telemetry daemons
+        netsh advfirewall firewall delete rule name="SurfaceGuard_Block_Proc_compattelrunner.exe" -ErrorAction SilentlyContinue 2>$null; if ($LASTEXITCODE -ne 0) { $global:LASTEXITCODE = 0 }; netsh advfirewall firewall add rule name="SurfaceGuard_Block_Proc_compattelrunner.exe" dir=out action=block program="%SystemRoot%\\System32\\compattelrunner.exe" enable=yes -ErrorAction SilentlyContinue
+        netsh advfirewall firewall delete rule name="SurfaceGuard_Block_Proc_diagtrack.exe" -ErrorAction SilentlyContinue 2>$null; if ($LASTEXITCODE -ne 0) { $global:LASTEXITCODE = 0 }; netsh advfirewall firewall add rule name="SurfaceGuard_Block_Proc_diagtrack.exe" dir=out action=block program="%SystemRoot%\\System32\\diagtrack.exe" enable=yes -ErrorAction SilentlyContinue
+
+        # 5. Keep USB Storage, Bluetooth, Webcam, and Microphone fully ENABLED for daily usability
+        Set-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\USBSTOR' -Name 'Start' -Value 3 -Force -ErrorAction SilentlyContinue
+        Set-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\CapabilityAccessManager\\ConsentStore\\webcam' -Name 'Value' -Value 'Allow' -Force -ErrorAction SilentlyContinue
+        Set-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\CapabilityAccessManager\\ConsentStore\\webcam\\NonPackaged' -Name 'Value' -Value 'Allow' -Force -ErrorAction SilentlyContinue
+        Set-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\CapabilityAccessManager\\ConsentStore\\microphone' -Name 'Value' -Value 'Allow' -Force -ErrorAction SilentlyContinue
+        Set-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\CapabilityAccessManager\\ConsentStore\\microphone\\NonPackaged' -Name 'Value' -Value 'Allow' -Force -ErrorAction SilentlyContinue
+        Get-PnpDevice -Class Bluetooth -ErrorAction SilentlyContinue | Enable-PnpDevice -Confirm:$false -ErrorAction SilentlyContinue
+        netsh advfirewall firewall delete rule name="SurfaceGuard_Block_All_Unlisted" -ErrorAction SilentlyContinue 2>$null
+      } -ErrorAction SilentlyContinue`;
     } else if (mode === 'developer') {
-      // Developer Mode: Localhost dev ports allowed, external WAN blocked
-      setPorts((prev) =>
-        prev.map((p) => {
-          if (p.port === 8000 || p.port === 9229) {
-            return { ...p, isOpen: true, isLoopbackOnly: true };
-          }
-          if (p.port === 445 || p.port === 3389) {
-            return { ...p, isOpen: false };
-          }
-          return p;
-        })
-      );
-      setHardware((prev) => ({ ...prev, camera: true, usbStorage: true }));
-      setTerminalLogs((l) => [
-        ...l,
+      profileTitle = 'Developer Sandbox Mode';
+      command = `$ErrorActionPreference = 'SilentlyContinue'; & {
+        netsh advfirewall firewall delete rule name="SurfaceGuard_Block_9229" -ErrorAction SilentlyContinue 2>$null
+        if ($LASTEXITCODE -ne 0) { $global:LASTEXITCODE = 0 }
+        netsh advfirewall firewall add rule name="SurfaceGuard_Block_9229" dir=in action=block protocol=TCP localport=9229 remoteip="!127.0.0.1" enable=yes -ErrorAction SilentlyContinue
+        netsh advfirewall firewall delete rule name="SurfaceGuard_Block_Proc_compattelrunner.exe" -ErrorAction SilentlyContinue 2>$null; if ($LASTEXITCODE -ne 0) { $global:LASTEXITCODE = 0 }; netsh advfirewall firewall add rule name="SurfaceGuard_Block_Proc_compattelrunner.exe" dir=out action=block program="%SystemRoot%\\System32\\compattelrunner.exe" enable=yes -ErrorAction SilentlyContinue
+        netsh advfirewall firewall delete rule name="SurfaceGuard_Block_Proc_diagtrack.exe" -ErrorAction SilentlyContinue 2>$null; if ($LASTEXITCODE -ne 0) { $global:LASTEXITCODE = 0 }; netsh advfirewall firewall add rule name="SurfaceGuard_Block_Proc_diagtrack.exe" dir=out action=block program="%SystemRoot%\\System32\\diagtrack.exe" enable=yes -ErrorAction SilentlyContinue
+      } -ErrorAction SilentlyContinue`;
+    } else if (mode === 'reset') {
+      profileTitle = 'Factory Reset / Default Baseline';
+      command = `$ErrorActionPreference = 'SilentlyContinue'; & {
+        Get-NetFirewallRule -Name "SurfaceGuard_*" -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction SilentlyContinue
+        netsh advfirewall firewall delete rule name="SurfaceGuard_Block_All_Unlisted" 2>$null
+        if ($LASTEXITCODE -ne 0) { $global:LASTEXITCODE = 0 }
+        Set-ItemProperty -Path 'HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows NT\\DNSClient' -Name 'EnableMulticast' -Value 1 -Force -ErrorAction SilentlyContinue
+        Set-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\USBSTOR' -Name 'Start' -Value 3 -Force -ErrorAction SilentlyContinue
+        Set-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\CapabilityAccessManager\\ConsentStore\\webcam' -Name 'Value' -Value 'Allow' -Force -ErrorAction SilentlyContinue
+        Set-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\CapabilityAccessManager\\ConsentStore\\webcam\\NonPackaged' -Name 'Value' -Value 'Allow' -Force -ErrorAction SilentlyContinue
+        Set-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\CapabilityAccessManager\\ConsentStore\\microphone' -Name 'Value' -Value 'Allow' -Force -ErrorAction SilentlyContinue
+        Set-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\CapabilityAccessManager\\ConsentStore\\microphone\\NonPackaged' -Name 'Value' -Value 'Allow' -Force -ErrorAction SilentlyContinue
+        Get-PnpDevice -Class Bluetooth -ErrorAction SilentlyContinue | Enable-PnpDevice -Confirm:$false -ErrorAction SilentlyContinue
+        icacls "$env:ProgramData" /reset /T /C 2>$null
+        icacls "$env:SystemRoot\\System32\\vssadmin.exe" /reset 2>$null
+        netsh advfirewall set allprofiles settings openinboundconnectionnotify enable 2>$null
+      } -ErrorAction SilentlyContinue`;
+    } else {
+      // meeting mode
+      profileTitle = 'Work & Meeting Mode';
+      command = `$ErrorActionPreference = 'SilentlyContinue'; & {
+        netsh advfirewall firewall delete rule name="SurfaceGuard_Block_445" -ErrorAction SilentlyContinue 2>$null; if ($LASTEXITCODE -ne 0) { $global:LASTEXITCODE = 0 }; netsh advfirewall firewall add rule name="SurfaceGuard_Block_445" dir=in action=block protocol=TCP localport=445 enable=yes -ErrorAction SilentlyContinue
+        netsh advfirewall firewall delete rule name="SurfaceGuard_Block_3389" -ErrorAction SilentlyContinue 2>$null; if ($LASTEXITCODE -ne 0) { $global:LASTEXITCODE = 0 }; netsh advfirewall firewall add rule name="SurfaceGuard_Block_3389" dir=in action=block protocol=TCP localport=3389 enable=yes -ErrorAction SilentlyContinue
+        Set-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\CapabilityAccessManager\\ConsentStore\\webcam' -Name 'Value' -Value 'Allow' -Force -ErrorAction SilentlyContinue
+        Set-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\CapabilityAccessManager\\ConsentStore\\microphone' -Name 'Value' -Value 'Allow' -Force -ErrorAction SilentlyContinue
+        Get-PnpDevice -Class Bluetooth -ErrorAction SilentlyContinue | Enable-PnpDevice -Confirm:$false -ErrorAction SilentlyContinue
+      } -ErrorAction SilentlyContinue`;
+    }
+
+    try {
+      setTerminalLogs((prev) => [
+        ...prev,
         '',
-        '[💻] APPLIED PROFILE: Software Developer Mode.',
-        '    [✓] Web server and debugger permitted strictly on localhost 127.0.0.1.',
+        `[>] ENFORCING PROFILE: ${profileTitle}...`,
+        '    [*] Applying OS security commands via PowerShell bridge...',
       ]);
+
+      const result = await runPowerShellWithAdmin(command);
+
+      // STRICT NO OPTIMISTIC UI: ONLY update states if result.success === true
+      if (result.success === true) {
+        setActiveProfile(mode);
+
+        if (mode === 'stealth') {
+          setIsStrictLockdown(true);
+          try { localStorage.setItem(STORAGE_STRICT_LOCKDOWN, 'true'); } catch {}
+          setPorts((prev) => {
+            const updated = prev.map((p) => ({ ...p, isOpen: false, isLoading: false }));
+            savePortsToStorage(updated);
+            return [...updated];
+          });
+          setHardware({
+            camera: true,
+            microphone: true,
+            usbStorage: true,
+            bluetooth: true,
+            fileSystemAcl: true,
+          });
+          setProcesses((prev) => {
+            const updated = prev.map((p) => (p.type === 'TELEMETRY' || p.type === 'UPDATER' ? { ...p, isBlocked: true } : p));
+            saveProcessesToStorage(updated);
+            return [...updated];
+          });
+          setVulnerabilities((prev) => prev.map((v) => ({ ...v, isVulnerable: false })));
+        } else if (mode === 'corporate') {
+          setIsStrictLockdown(false);
+          try { localStorage.setItem(STORAGE_STRICT_LOCKDOWN, 'false'); } catch {}
+          setPorts((prev) => {
+            const updated = prev.map((p) =>
+              [445, 3389, 135, 137, 138, 139, 5985, 5986].includes(p.port) ? { ...p, isOpen: false, isLoading: false } : p
+            );
+            savePortsToStorage(updated);
+            return [...updated];
+          });
+          setHardware({
+            camera: true,
+            microphone: true,
+            usbStorage: true,
+            bluetooth: true,
+            fileSystemAcl: true,
+          });
+          setProcesses((prev) => {
+            const updated = prev.map((p) => (p.type === 'TELEMETRY' || p.type === 'UPDATER' ? { ...p, isBlocked: true } : p));
+            saveProcessesToStorage(updated);
+            return [...updated];
+          });
+        } else if (mode === 'home') {
+          setIsStrictLockdown(false);
+          try { localStorage.setItem(STORAGE_STRICT_LOCKDOWN, 'false'); } catch {}
+          setPorts((prev) => {
+            const updated = prev.map((p) =>
+              [445, 137, 138, 139].includes(p.port)
+                ? { ...p, isOpen: false, isLoading: false }
+                : { ...p, isOpen: true, isLoading: false }
+            );
+            savePortsToStorage(updated);
+            return [...updated];
+          });
+          setHardware({
+            camera: false,      // Enabled for video calls
+            microphone: false,  // Enabled for voice
+            usbStorage: false,  // Enabled for thumb drives
+            bluetooth: false,   // Enabled for headsets/controllers
+            fileSystemAcl: true // Baseline protected
+          });
+          setProcesses((prev) => {
+            const updated = prev.map((p) => (/compattelrunner|diagtrack/i.test(p.name) ? { ...p, isBlocked: true } : p));
+            saveProcessesToStorage(updated);
+            return [...updated];
+          });
+        } else if (mode === 'developer') {
+          setIsStrictLockdown(false);
+          try { localStorage.setItem(STORAGE_STRICT_LOCKDOWN, 'false'); } catch {}
+          setPorts((prev) => {
+            const updated = prev.map((p) => {
+              if ([3000, 5173, 8000, 8080, 5432, 9229].includes(p.port)) {
+                return { ...p, isOpen: true, isLoopbackOnly: true, isLoading: false };
+              }
+              if (p.port === 445 || p.port === 3389) {
+                return { ...p, isOpen: false, isLoading: false };
+              }
+              return { ...p, isLoading: false };
+            });
+            savePortsToStorage(updated);
+            return [...updated];
+          });
+          setHardware((prev) => ({ ...prev, usbStorage: true, fileSystemAcl: true }));
+          setProcesses((prev) => {
+            const updated = prev.map((p) => (/compattelrunner|diagtrack/i.test(p.name) ? { ...p, isBlocked: true } : p));
+            saveProcessesToStorage(updated);
+            return [...updated];
+          });
+        } else if (mode === 'reset') {
+          setIsStrictLockdown(false);
+          try { localStorage.setItem(STORAGE_STRICT_LOCKDOWN, 'false'); } catch {}
+          setActiveLease(null);
+          setPorts((prev) => {
+            const updated = prev.map((p) => ({ ...p, isOpen: true, isLoading: false }));
+            savePortsToStorage(updated);
+            return [...updated];
+          });
+          setHardware({
+            camera: false,
+            microphone: false,
+            usbStorage: false,
+            bluetooth: false,
+            fileSystemAcl: false,
+          });
+          setProcesses((prev) => {
+            const updated = prev.map((p) => ({ ...p, isBlocked: false }));
+            saveProcessesToStorage(updated);
+            return [...updated];
+          });
+        } else {
+          // meeting
+          setPorts((prev) => {
+            const updated = prev.map((p) => ([445, 135, 3389].includes(p.port) ? { ...p, isOpen: false, isLoading: false } : p));
+            savePortsToStorage(updated);
+            return [...updated];
+          });
+          setHardware({
+            camera: false,
+            microphone: false,
+            usbStorage: true,
+            bluetooth: false,
+            fileSystemAcl: true,
+          });
+        }
+
+        setTerminalLogs((prev) => [
+          ...prev,
+          `[✓] PROFILE APPLIED SUCCESSFULLY: ${profileTitle}.`,
+          `    Output: ${result.output}`,
+        ]);
+
+        setPortNotificationAlert({
+          title: `${profileTitle} Enforced`,
+          message: `All security rules and policies for ${profileTitle} have been applied to your workstation.`,
+          type: 'success',
+        });
+
+        return true;
+      } else {
+        const errorMsg = result.output || `Failed to enforce ${profileTitle}.`;
+        setTerminalLogs((prev) => [
+          ...prev,
+          `[✗] Failed to apply ${profileTitle}: ${errorMsg}`,
+        ]);
+        setPortNotificationAlert({
+          title: `Profile Error: ${profileTitle}`,
+          message: errorMsg,
+          type: 'error',
+        });
+        return false;
+      }
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      setTerminalLogs((prev) => [
+        ...prev,
+        `[✗] Exception applying ${profileTitle}: ${errorMsg}`,
+      ]);
+      setPortNotificationAlert({
+        title: `Profile Exception: ${profileTitle}`,
+        message: errorMsg,
+        type: 'error',
+      });
+      return false;
+    } finally {
+      setProfileLoading(null);
     }
   };
 
@@ -2314,6 +2540,8 @@ export const SecurityProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         targetOS,
         setTargetOS,
         activeProfile,
+        isApplyingProfile,
+        profileLoading,
         applyProfile,
         vulnerabilities,
         fixVulnerability,

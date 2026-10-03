@@ -115,7 +115,7 @@ export interface HardwareState {
   fileSystemAcl: boolean;
 }
 
-export type SecurityProfileMode = 'stealth' | 'meeting' | 'developer' | 'custom';
+export type SecurityProfileMode = 'stealth' | 'corporate' | 'home' | 'meeting' | 'developer' | 'reset' | 'custom';
 
 export interface VulnerabilityAuditItem {
   id: string;

@@ -21,8 +21,10 @@ import {
   Unlock,
   Shield,
   Briefcase,
+  Home,
   Code,
-  Cpu
+  Cpu,
+  Loader2
 } from 'lucide-react';
 import { useSecurity } from '../context/SecurityContext';
 
@@ -40,6 +42,8 @@ export const CommandCenter: React.FC<CommandCenterProps> = ({ onNavigate }) => {
     isFullHardened,
     targetOS,
     activeProfile,
+    isApplyingProfile,
+    profileLoading,
     applyProfile,
     vulnerabilities,
     fixVulnerability,
@@ -84,46 +88,78 @@ export const CommandCenter: React.FC<CommandCenterProps> = ({ onNavigate }) => {
               <span className="text-xs text-slate-400 font-semibold mr-1 font-sans">Quick Modes:</span>
               <button
                 onClick={() => applyProfile('stealth')}
-                className={`px-3 py-1 rounded-lg text-xs font-bold transition-colors flex items-center gap-1.5 ${
+                disabled={isApplyingProfile}
+                className={`px-3 py-1 rounded-lg text-xs font-bold transition-colors flex items-center gap-1.5 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed ${
                   activeProfile === 'stealth'
                     ? 'bg-emerald-600 text-white'
                     : 'bg-slate-950 text-slate-300 border border-slate-800 hover:border-slate-700'
                 }`}
               >
-                <Shield className="w-3.5 h-3.5" />
+                {profileLoading === 'stealth' ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <Shield className="w-3.5 h-3.5" />
+                )}
                 <span>Stealth Mode</span>
               </button>
 
               <button
-                onClick={() => applyProfile('meeting')}
-                className={`px-3 py-1 rounded-lg text-xs font-bold transition-colors flex items-center gap-1.5 ${
-                  activeProfile === 'meeting'
+                onClick={() => applyProfile('corporate')}
+                disabled={isApplyingProfile}
+                className={`px-3 py-1 rounded-lg text-xs font-bold transition-colors flex items-center gap-1.5 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed ${
+                  activeProfile === 'corporate'
                     ? 'bg-cyan-600 text-slate-950'
                     : 'bg-slate-950 text-slate-300 border border-slate-800 hover:border-slate-700'
                 }`}
               >
-                <Briefcase className="w-3.5 h-3.5" />
-                <span>Meeting Mode (Zoom/Teams)</span>
+                {profileLoading === 'corporate' ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <Briefcase className="w-3.5 h-3.5" />
+                )}
+                <span>Enterprise Mode</span>
+              </button>
+
+              <button
+                onClick={() => applyProfile('home')}
+                disabled={isApplyingProfile}
+                className={`px-3 py-1 rounded-lg text-xs font-bold transition-colors flex items-center gap-1.5 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed ${
+                  activeProfile === 'home'
+                    ? 'bg-blue-600 text-white'
+                    : 'bg-slate-950 text-slate-300 border border-slate-800 hover:border-slate-700'
+                }`}
+              >
+                {profileLoading === 'home' ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <Home className="w-3.5 h-3.5" />
+                )}
+                <span>Home Mode</span>
               </button>
 
               <button
                 onClick={() => applyProfile('developer')}
-                className={`px-3 py-1 rounded-lg text-xs font-bold transition-colors flex items-center gap-1.5 ${
+                disabled={isApplyingProfile}
+                className={`px-3 py-1 rounded-lg text-xs font-bold transition-colors flex items-center gap-1.5 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed ${
                   activeProfile === 'developer'
                     ? 'bg-purple-600 text-white'
                     : 'bg-slate-950 text-slate-300 border border-slate-800 hover:border-slate-700'
                 }`}
               >
-                <Code className="w-3.5 h-3.5" />
+                {profileLoading === 'developer' ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <Code className="w-3.5 h-3.5" />
+                )}
                 <span>Developer Mode</span>
               </button>
 
               <button
-                onClick={() => onNavigate('processes')}
-                className="px-3 py-1 rounded-lg text-xs font-bold bg-cyan-950 text-cyan-400 border border-cyan-800/80 hover:bg-cyan-900 transition-colors flex items-center gap-1.5"
+                onClick={() => onNavigate('profiles')}
+                className="px-3 py-1 rounded-lg text-xs font-bold bg-cyan-950 text-cyan-400 border border-cyan-800/80 hover:bg-cyan-900 transition-colors flex items-center gap-1.5 cursor-pointer"
               >
-                <Cpu className="w-3.5 h-3.5" />
-                <span>Process Blocker</span>
+                <Zap className="w-3.5 h-3.5" />
+                <span>All Defense Modes</span>
                 <ArrowRight className="w-3 h-3" />
               </button>
             </div>
