@@ -26,7 +26,6 @@ export const TopBar: React.FC<TopBarProps> = ({
     { id: 'hardware', label: 'Camera & Devices' },
     { id: 'pam', label: 'App Permissions' },
     { id: 'profiles', label: 'Defense Modes' },
-    { id: 'windows-app', label: 'Windows .exe App' },
     { id: 'generator', label: 'Export Scripts' },
   ];
 

@@ -13,12 +13,11 @@ import { HardwareControl } from './components/HardwareControl';
 import { PamSimulator } from './components/PamSimulator';
 import { SecurityProfiles } from './components/SecurityProfiles';
 import { ScriptGenerator } from './components/ScriptGenerator';
-import { WindowsDesktopGuide } from './components/WindowsDesktopGuide';
 import { ExecutiveReportModal } from './components/ExecutiveReportModal';
 import { ShieldAlert } from 'lucide-react';
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<string>('dashboard');
+  const [activeTab, setActiveTab] = useState<string>('profiles');
   const [isReportOpen, setIsReportOpen] = useState<boolean>(false);
   const [isLockedDown, setIsLockedDown] = useState<boolean>(false);
 
@@ -75,8 +74,6 @@ export default function App() {
           {activeTab === 'profiles' && <SecurityProfiles />}
 
           {activeTab === 'generator' && <ScriptGenerator />}
-
-          {activeTab === 'windows-app' && <WindowsDesktopGuide />}
         </main>
 
         {/* Formal Audit Report Modal */}
