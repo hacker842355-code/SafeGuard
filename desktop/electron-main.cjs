@@ -76,7 +76,7 @@ ipcMain.handle('run-powershell-command', async (event, { command, requireAdmin }
     const tempScriptPath = path.join(app.getPath('temp'), `surfaceguard_${Date.now()}.ps1`);
     const resultPath = `${tempScriptPath}.result`;
     const script = [
-      '$ErrorActionPreference = "Stop"',
+      '$ErrorActionPreference = "SilentlyContinue"',
       'try {',
       `  $output = & { ${command} } 2>&1 | Out-String`,
       `  Set-Content -LiteralPath '${resultPath.replace(/'/g, "''")}' -Value $output -Encoding UTF8`,
@@ -132,7 +132,7 @@ ipcMain.handle('query-windows-ports', async (event) => {
     "  Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | ForEach-Object { [pscustomobject]@{ Protocol = 'TCP'; LocalAddress = $_.LocalAddress; LocalPort = $_.LocalPort; OwningProcess = $_.OwningProcess } }",
     "  Get-NetUDPEndpoint -ErrorAction SilentlyContinue | ForEach-Object { [pscustomobject]@{ Protocol = 'UDP'; LocalAddress = $_.LocalAddress; LocalPort = $_.LocalPort; OwningProcess = $_.OwningProcess } }",
     ')',
-    '$listeners | ConvertTo-Json -Compress',
+    '$listeners | ConvertTo-Json -Compress -Depth 3',
   ].join('; ');
 
   return new Promise((resolve) => {

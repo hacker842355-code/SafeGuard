@@ -35,6 +35,8 @@ export const EndpointSimulator: React.FC = () => {
     activeAttack,
     scanPorts,
     togglePort,
+    isResettingPorts,
+    resetToDefaultLockdown,
     addCustomPort,
     executeHardening,
     executeRollback,
@@ -114,7 +116,7 @@ export const EndpointSimulator: React.FC = () => {
   return (
     <div className="space-y-6">
       {/* Header and OS Switcher */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
           <h2 className="text-xl sm:text-2xl font-bold tracking-tight text-white font-sans flex items-center gap-2.5">
             <Network className="w-6 h-6 text-cyan-400" />
@@ -125,21 +127,39 @@ export const EndpointSimulator: React.FC = () => {
           </p>
         </div>
 
-        {/* OS selector */}
-        <div className="flex items-center gap-1.5 bg-slate-900 p-1.5 rounded-lg border border-slate-800 self-start sm:self-auto">
-          {(['windows', 'linux', 'macos'] as const).map((os) => (
-            <button
-              key={os}
-              onClick={() => setTargetOS(os)}
-              className={`px-3 py-1 text-xs font-semibold rounded-md capitalize transition-colors ${
-                targetOS === os
-                  ? 'bg-slate-800 text-cyan-400'
-                  : 'text-slate-400 hover:text-slate-200'
-              }`}
-            >
-              {os}
-            </button>
-          ))}
+        {/* Action Header: Master Reset Button & OS selector */}
+        <div className="flex flex-wrap items-center gap-2.5 self-start md:self-auto">
+          {/* Master "Reset to Default Lockdown" Action Button */}
+          <button
+            onClick={resetToDefaultLockdown}
+            disabled={isResettingPorts || isScanning || isHardening}
+            title="Reset all ports to factory Zero-Trust Default Lockdown"
+            className="flex items-center gap-2 px-3.5 py-2 bg-red-600 hover:bg-red-500 disabled:opacity-50 text-white font-bold text-xs rounded-lg transition-all shadow-md shadow-red-950/50 border border-red-500/80 whitespace-nowrap cursor-pointer active:scale-95"
+          >
+            {isResettingPorts ? (
+              <Loader2 className="w-4 h-4 text-white animate-spin" />
+            ) : (
+              <ShieldAlert className="w-4 h-4 text-white" />
+            )}
+            <span>{isResettingPorts ? 'Enforcing Default Lockdown...' : 'Reset All Ports / Default Lockdown'}</span>
+          </button>
+
+          {/* OS selector */}
+          <div className="flex items-center gap-1.5 bg-slate-900 p-1.5 rounded-lg border border-slate-800">
+            {(['windows', 'linux', 'macos'] as const).map((os) => (
+              <button
+                key={os}
+                onClick={() => setTargetOS(os)}
+                className={`px-3 py-1 text-xs font-semibold rounded-md capitalize transition-colors ${
+                  targetOS === os
+                    ? 'bg-slate-800 text-cyan-400'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                {os}
+              </button>
+            ))}
+          </div>
         </div>
       </div>
 
@@ -613,7 +633,7 @@ export const EndpointSimulator: React.FC = () => {
                             <span className={`text-[10px] font-mono font-bold ${
                               p.isOpen ? 'text-red-400' : 'text-emerald-400'
                             }`}>
-                              {p.isOpen ? 'ON' : 'OFF'}
+                              {p.isOpen ? 'OPEN' : 'BLOCKED'}
                             </span>
                             <button
                               onClick={() => togglePort(p.port)}

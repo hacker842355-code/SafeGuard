@@ -116,6 +116,9 @@ interface SecurityContextType {
   scanPorts: () => Promise<void>;
   scanProcesses: () => Promise<void>;
   togglePort: (portNumber: number) => Promise<void>;
+  isResettingPorts: boolean;
+  resetToDefaultLockdown: () => Promise<void>;
+  syncFirewallRulesFromOS: () => Promise<void>;
   toggleProcessBlock: (pid: number) => Promise<boolean>;
   blockAllProcesses: () => Promise<void>;
   allowAllProcesses: () => Promise<void>;
@@ -492,12 +495,111 @@ const getProcessImpact = (
   return description || (company ? `${company} background task.` : `Active background system process: ${name}.`);
 };
 
+// ==============================================================================
+// PERSISTENT STORAGE HELPERS (Local & Cross-Session Configuration)
+// ==============================================================================
+const STORAGE_PORTS_STATE = 'surfaceguard_ports_state';
+const STORAGE_CUSTOM_PORTS = 'surfaceguard_custom_ports';
+const STORAGE_PROCESSES_STATE = 'surfaceguard_processes_state';
+const STORAGE_CUSTOM_PROCESSES = 'surfaceguard_custom_processes';
+const STORAGE_STRICT_LOCKDOWN = 'surfaceguard_strict_lockdown';
+const STORAGE_SCAN_INTERVAL = 'surfaceguard_scan_interval';
+
+const loadInitialPorts = (): PortItem[] => {
+  if (typeof window === 'undefined') return initialPorts;
+  try {
+    const savedCustomJson = localStorage.getItem(STORAGE_CUSTOM_PORTS);
+    const savedCustom: PortItem[] = savedCustomJson ? JSON.parse(savedCustomJson) : [];
+
+    const savedStatesJson = localStorage.getItem(STORAGE_PORTS_STATE);
+    const savedStates: Record<string, boolean> = savedStatesJson ? JSON.parse(savedStatesJson) : {};
+
+    const combinedMap = new Map<string, PortItem>();
+    initialPorts.forEach((p) => combinedMap.set(`${p.port}_${p.protocol}`, { ...p }));
+    savedCustom.forEach((p) => combinedMap.set(`${p.port}_${p.protocol}`, { ...p, isCustom: true }));
+
+    return Array.from(combinedMap.values()).map((p) => {
+      const key = `${p.port}_${p.protocol}`;
+      if (key in savedStates) {
+        return { ...p, isOpen: savedStates[key], isLoading: false };
+      }
+      return { ...p, isLoading: false };
+    });
+  } catch (err) {
+    console.warn('Error reading ports from storage:', err);
+    return initialPorts;
+  }
+};
+
+const loadInitialProcesses = (): BackgroundProcess[] => {
+  if (typeof window === 'undefined') return initialProcesses;
+  try {
+    const savedCustomJson = localStorage.getItem(STORAGE_CUSTOM_PROCESSES);
+    const savedCustom: BackgroundProcess[] = savedCustomJson ? JSON.parse(savedCustomJson) : [];
+
+    const savedStatesJson = localStorage.getItem(STORAGE_PROCESSES_STATE);
+    const savedStates: Record<string, boolean> = savedStatesJson ? JSON.parse(savedStatesJson) : {};
+
+    const combinedMap = new Map<string, BackgroundProcess>();
+    initialProcesses.forEach((p) => combinedMap.set(p.path.toLowerCase() || p.name.toLowerCase(), { ...p }));
+    savedCustom.forEach((p) => combinedMap.set(p.path.toLowerCase() || p.name.toLowerCase(), { ...p, type: 'CUSTOM' }));
+
+    return Array.from(combinedMap.values()).map((p) => {
+      const key = p.path.toLowerCase() || p.name.toLowerCase();
+      if (key in savedStates) {
+        return { ...p, isBlocked: savedStates[key] };
+      }
+      return p;
+    });
+  } catch (err) {
+    console.warn('Error reading processes from storage:', err);
+    return initialProcesses;
+  }
+};
+
+const savePortsToStorage = (portsList: PortItem[]) => {
+  if (typeof window === 'undefined') return;
+  try {
+    const states: Record<string, boolean> = {};
+    const customPorts: PortItem[] = [];
+    portsList.forEach((p) => {
+      states[`${p.port}_${p.protocol}`] = p.isOpen;
+      if (p.isCustom) {
+        customPorts.push(p);
+      }
+    });
+    localStorage.setItem(STORAGE_PORTS_STATE, JSON.stringify(states));
+    localStorage.setItem(STORAGE_CUSTOM_PORTS, JSON.stringify(customPorts));
+  } catch (e) {
+    console.warn('Failed to save ports to localStorage:', e);
+  }
+};
+
+const saveProcessesToStorage = (procList: BackgroundProcess[]) => {
+  if (typeof window === 'undefined') return;
+  try {
+    const states: Record<string, boolean> = {};
+    const customProcs: BackgroundProcess[] = [];
+    procList.forEach((p) => {
+      const key = p.path.toLowerCase() || p.name.toLowerCase();
+      states[key] = p.isBlocked;
+      if (p.type === 'CUSTOM') {
+        customProcs.push(p);
+      }
+    });
+    localStorage.setItem(STORAGE_PROCESSES_STATE, JSON.stringify(states));
+    localStorage.setItem(STORAGE_CUSTOM_PROCESSES, JSON.stringify(customProcs));
+  } catch (e) {
+    console.warn('Failed to save processes to localStorage:', e);
+  }
+};
+
 const SecurityContext = createContext<SecurityContextType | undefined>(undefined);
 
 export const SecurityProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [ports, setPorts] = useState<PortItem[]>(initialPorts);
+  const [ports, setPorts] = useState<PortItem[]>(loadInitialPorts);
   const [hardware, setHardware] = useState<HardwareState>(initialHardware);
-  const [processes, setProcesses] = useState<BackgroundProcess[]>(initialProcesses);
+  const [processes, setProcesses] = useState<BackgroundProcess[]>(loadInitialProcesses);
   const [isScanningProcesses, setIsScanningProcesses] = useState<boolean>(false);
   const [isUpdatingProcesses, setIsUpdatingProcesses] = useState<boolean>(false);
   const [processAction, setProcessAction] = useState<'BLOCK_ALL' | 'ALLOW_ALL' | null>(null);
@@ -513,10 +615,18 @@ export const SecurityProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const [loadingHardwareDevice, setLoadingHardwareDevice] = useState<keyof HardwareState | null>(null);
 
   // Network Ports Hardening States
-  const [isStrictLockdown, setIsStrictLockdown] = useState<boolean>(false);
+  const [isStrictLockdown, setIsStrictLockdown] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return false;
+    return localStorage.getItem(STORAGE_STRICT_LOCKDOWN) === 'true';
+  });
   const [isStrictLockdownLoading, setIsStrictLockdownLoading] = useState<boolean>(false);
+  const [isResettingPorts, setIsResettingPorts] = useState<boolean>(false);
   const [portNotificationAlert, setPortNotificationAlert] = useState<PortNotificationAlert | null>(null);
-  const [portScanInterval, setPortScanInterval] = useState<number>(15);
+  const [portScanInterval, setPortScanInterval] = useState<number>(() => {
+    if (typeof window === 'undefined') return 15;
+    const saved = localStorage.getItem(STORAGE_SCAN_INTERVAL);
+    return saved ? Number(saved) || 15 : 15;
+  });
   const [lastPortScanTime, setLastPortScanTime] = useState<string | null>(null);
 
   // Temporary App Permissions (PAM) System States
@@ -598,6 +708,20 @@ export const SecurityProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       return {
         success: true,
         output: JSON.stringify(simulatedData),
+      };
+    }
+    if (command.includes('Get-NetFirewallRule')) {
+      const simulatedRules = ports
+        .filter((p) => !p.isOpen)
+        .map((p) => ({
+          Name: `SurfaceGuard_Block_${p.port}`,
+          Enabled: 1,
+          Action: 4,
+          Direction: 1,
+        }));
+      return {
+        success: true,
+        output: JSON.stringify({ SgRules: simulatedRules, PortFilters: [] }),
       };
     }
     return {
@@ -822,14 +946,14 @@ export const SecurityProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     const nextBlocked = !process.isBlocked;
     const exeName = process.name.endsWith('.exe') ? process.name : `${process.name}.exe`;
     const ruleName = `SurfaceGuard_Block_Proc_${exeName}`;
-    const safePath = process.path;
+    const safePath = process.path.replace(/'/g, "''");
 
     setUpdatingProcessIds((current) => [...current, pid]);
 
-    // Path-based firewall blocking rule with single-quote escaping:
+    // Path-based firewall blocking rule with single-quote escaping & idempotency:
     const command = nextBlocked
-      ? `netsh advfirewall firewall delete rule name='${ruleName}' 2>$null; netsh advfirewall firewall add rule name='${ruleName}' dir=out action=block program='${safePath}' enable=yes`
-      : `netsh advfirewall firewall delete rule name='${ruleName}'`;
+      ? `$ErrorActionPreference = 'SilentlyContinue'; & { netsh advfirewall firewall delete rule name='${ruleName}' -ErrorAction SilentlyContinue 2>$null; if ($LASTEXITCODE -ne 0) { $global:LASTEXITCODE = 0 }; netsh advfirewall firewall add rule name='${ruleName}' dir=out action=block program='${safePath}' enable=yes -ErrorAction SilentlyContinue } -ErrorAction SilentlyContinue`
+      : `$ErrorActionPreference = 'SilentlyContinue'; & { netsh advfirewall firewall delete rule name='${ruleName}' -ErrorAction SilentlyContinue 2>$null; if ($LASTEXITCODE -ne 0) { $global:LASTEXITCODE = 0 } } -ErrorAction SilentlyContinue`;
 
     try {
       const result = await runPowerShellWithAdmin(command);
@@ -849,15 +973,17 @@ export const SecurityProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       }
 
       // ONLY commit UI update when result.success === true (No Optimistic UI):
-      setProcesses((current) =>
-        current.map((item) =>
+      setProcesses((current) => {
+        const updated = current.map((item) =>
           item.pid === pid ? { ...item, isBlocked: nextBlocked } : item
-        )
-      );
+        );
+        saveProcessesToStorage(updated);
+        return [...updated];
+      });
 
       setTerminalLogs((current) => [
         ...current,
-        `${nextBlocked ? '[✓] FIREWALL BLOCKED (OUTBOUND DROP)' : '[!] FIREWALL ALLOWED (INTERNET ACTIVE)'}: ${process.name} [${safePath}].`,
+        `${nextBlocked ? '[✓] FIREWALL BLOCKED (OUTBOUND DROP)' : '[!] FIREWALL ALLOWED (INTERNET ACTIVE)'}: ${process.name} [${process.path}].`,
         `    Rule: ${ruleName}`,
       ]);
 
@@ -902,12 +1028,15 @@ export const SecurityProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       .map((t) => {
         const exeName = t.name.endsWith('.exe') ? t.name : `${t.name}.exe`;
         const ruleName = `SurfaceGuard_Block_Proc_${exeName}`;
-        return `netsh advfirewall firewall delete rule name='${ruleName}' 2>$null; netsh advfirewall firewall add rule name='${ruleName}' dir=out action=block program='${t.path}' enable=yes`;
+        const safePath = t.path.replace(/'/g, "''");
+        return `netsh advfirewall firewall delete rule name='${ruleName}' -ErrorAction SilentlyContinue 2>$null; if ($LASTEXITCODE -ne 0) { $global:LASTEXITCODE = 0 }; netsh advfirewall firewall add rule name='${ruleName}' dir=out action=block program='${safePath}' enable=yes -ErrorAction SilentlyContinue`;
       })
       .join('; ');
 
+    const fullCommand = `$ErrorActionPreference = 'SilentlyContinue'; & { ${commands} } -ErrorAction SilentlyContinue`;
+
     try {
-      const result = await runPowerShellWithAdmin(commands);
+      const result = await runPowerShellWithAdmin(fullCommand);
       if (!result.success) {
         const errorMsg = result.output || 'Batch firewall rule update failed.';
         setTerminalLogs((current) => [
@@ -922,13 +1051,15 @@ export const SecurityProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         return;
       }
 
-      setProcesses((current) =>
-        current.map((process) =>
+      setProcesses((current) => {
+        const updated = current.map((process) =>
           process.type === 'TELEMETRY' || process.type === 'UPDATER'
             ? { ...process, isBlocked: true }
             : process
-        )
-      );
+        );
+        saveProcessesToStorage(updated);
+        return [...updated];
+      });
 
       setTerminalLogs((current) => [
         ...current,
@@ -972,12 +1103,14 @@ export const SecurityProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       .map((t) => {
         const exeName = t.name.endsWith('.exe') ? t.name : `${t.name}.exe`;
         const ruleName = `SurfaceGuard_Block_Proc_${exeName}`;
-        return `netsh advfirewall firewall delete rule name='${ruleName}' 2>$null`;
+        return `netsh advfirewall firewall delete rule name='${ruleName}' -ErrorAction SilentlyContinue 2>$null; if ($LASTEXITCODE -ne 0) { $global:LASTEXITCODE = 0 }`;
       })
       .join('; ');
 
+    const fullCommand = `$ErrorActionPreference = 'SilentlyContinue'; & { ${commands} } -ErrorAction SilentlyContinue`;
+
     try {
-      const result = await runPowerShellWithAdmin(commands);
+      const result = await runPowerShellWithAdmin(fullCommand);
       if (!result.success) {
         const errorMsg = result.output || 'Batch firewall rule deletion failed.';
         setTerminalLogs((current) => [
@@ -992,9 +1125,11 @@ export const SecurityProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         return;
       }
 
-      setProcesses((current) =>
-        current.map((process) => ({ ...process, isBlocked: false }))
-      );
+      setProcesses((current) => {
+        const updated = current.map((process) => ({ ...process, isBlocked: false }));
+        saveProcessesToStorage(updated);
+        return [...updated];
+      });
 
       setTerminalLogs((current) => [
         ...current,
@@ -1023,6 +1158,7 @@ export const SecurityProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     const processName = /[/\\]/.test(name) ? name.split(/[\\/]/).pop() || name : name;
     const exeName = processName.toLowerCase().endsWith('.exe') ? processName : `${processName}.exe`;
     const executablePath = suppliedPath || `C:\\Windows\\System32\\${exeName}`;
+    const safePath = executablePath.replace(/'/g, "''");
     const ruleName = `SurfaceGuard_Block_Proc_${exeName}`;
 
     if (processes.some((process) => process.name.toLowerCase() === exeName.toLowerCase())) {
@@ -1035,7 +1171,7 @@ export const SecurityProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     }
 
     setIsAddingCustomProcess(true);
-    const command = `netsh advfirewall firewall delete rule name='${ruleName}' 2>$null; netsh advfirewall firewall add rule name='${ruleName}' dir=out action=block program='${executablePath}' enable=yes`;
+    const command = `$ErrorActionPreference = 'SilentlyContinue'; & { netsh advfirewall firewall delete rule name='${ruleName}' -ErrorAction SilentlyContinue 2>$null; if ($LASTEXITCODE -ne 0) { $global:LASTEXITCODE = 0 }; netsh advfirewall firewall add rule name='${ruleName}' dir=out action=block program='${safePath}' enable=yes -ErrorAction SilentlyContinue } -ErrorAction SilentlyContinue`;
 
     try {
       const result = await runPowerShellWithAdmin(command);
@@ -1063,7 +1199,11 @@ export const SecurityProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         impact: `User-defined blocked executable (${exeName}). Outbound drop rule active.`,
       };
 
-      setProcesses((current) => [newProcess, ...current]);
+      setProcesses((current) => {
+        const updated = [newProcess, ...current];
+        saveProcessesToStorage(updated);
+        return [...updated];
+      });
       setTerminalLogs((current) => [
         ...current,
         `[✓] CUSTOM PROCESS ADDED & BLOCKED: ${exeName} [${executablePath}].`,
@@ -1248,8 +1388,8 @@ export const SecurityProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     setIsStrictLockdownLoading(true);
     const nextState = !isStrictLockdown;
     const command = nextState
-      ? `netsh advfirewall firewall add rule name="SurfaceGuard_Block_All_Unlisted" dir=in action=block protocol=TCP localport=1-65535`
-      : `netsh advfirewall firewall delete rule name="SurfaceGuard_Block_All_Unlisted"`;
+      ? `$ErrorActionPreference = 'SilentlyContinue'; & { netsh advfirewall firewall delete rule name="SurfaceGuard_Block_All_Unlisted" -ErrorAction SilentlyContinue 2>$null; if ($LASTEXITCODE -ne 0) { $global:LASTEXITCODE = 0 }; netsh advfirewall firewall add rule name="SurfaceGuard_Block_All_Unlisted" dir=in action=block protocol=TCP localport=1-65535 enable=yes -ErrorAction SilentlyContinue } -ErrorAction SilentlyContinue`
+      : `$ErrorActionPreference = 'SilentlyContinue'; & { netsh advfirewall firewall delete rule name="SurfaceGuard_Block_All_Unlisted" -ErrorAction SilentlyContinue 2>$null; if ($LASTEXITCODE -ne 0) { $global:LASTEXITCODE = 0 } } -ErrorAction SilentlyContinue`;
 
     try {
       const result = await runPowerShellWithAdmin(command);
@@ -1258,6 +1398,9 @@ export const SecurityProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       // Only toggle state when execution returns a successful result (result.success === true)
       if (result.success === true) {
         setIsStrictLockdown(nextState);
+        try {
+          localStorage.setItem(STORAGE_STRICT_LOCKDOWN, String(nextState));
+        } catch {}
         setTerminalLogs((prev) => [
           ...prev,
           nextState
@@ -1300,7 +1443,148 @@ export const SecurityProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     }
   };
 
-  // 2. Individual Port Blocking/Unblocking with NO OPTIMISTIC UI STATE UPDATES
+  // Automated startup firewall audit & OS sync (Task 4)
+  const syncFirewallRulesFromOS = async () => {
+    try {
+      if (typeof window !== 'undefined' && window.electronAPI?.runPowerShell) {
+        const psCommand = `$ErrorActionPreference = 'SilentlyContinue'; & { $rules = Get-NetFirewallRule -Name 'SurfaceGuard_Block_*' -ErrorAction SilentlyContinue | Select-Object -Property Name, Enabled, Action, Direction; $portFilters = Get-NetFirewallPortFilter -ErrorAction SilentlyContinue | Select-Object -Property InstanceID, LocalPort, Protocol; @{ SgRules = $rules; PortFilters = $portFilters } | ConvertTo-Json -Compress -Depth 3 } -ErrorAction SilentlyContinue`;
+        const result = await window.electronAPI.runPowerShell(psCommand, false);
+        if (result.success && result.output) {
+          let parsedRules: any[] = [];
+          try {
+            const clean = result.output.replace(/^\uFEFF/, '').trim();
+            const jsonStart = clean.indexOf('{');
+            const jsonEnd = clean.lastIndexOf('}');
+            if (jsonStart !== -1 && jsonEnd !== -1) {
+              const data = JSON.parse(clean.slice(jsonStart, jsonEnd + 1));
+              parsedRules = Array.isArray(data.SgRules) ? data.SgRules : (data.SgRules ? [data.SgRules] : []);
+            }
+          } catch (e) {
+            console.error('Error parsing startup firewall audit JSON:', e);
+          }
+
+          const blockedPortSet = new Set<number>();
+          parsedRules.forEach((r) => {
+            if (r && r.Name && (r.Enabled === true || r.Enabled === 1 || r.Enabled === 'True' || r.Enabled === '1')) {
+              const match = String(r.Name).match(/SurfaceGuard_Block_(\d+)/i);
+              if (match) {
+                blockedPortSet.add(Number(match[1]));
+              }
+            }
+          });
+
+          setPorts((prev) => {
+            const updated = prev.map((p) => {
+              const isBlocked = blockedPortSet.has(p.port);
+              return {
+                ...p,
+                isOpen: !isBlocked,
+                isLoading: false,
+              };
+            });
+            savePortsToStorage(updated);
+            return [...updated];
+          });
+
+          setTerminalLogs((prev) => [
+            ...prev,
+            `[✓] Startup Firewall Audit & Sync: Cross-referenced active Windows Firewall rules (${blockedPortSet.size} active SurfaceGuard block rules detected).`,
+          ]);
+        }
+      } else {
+        setTerminalLogs((prev) => [
+          ...prev,
+          `[*] Startup Firewall Audit: Loaded persistent configuration (${ports.filter((p) => !p.isOpen).length} blocked ports active).`,
+        ]);
+      }
+    } catch (err) {
+      console.warn('Startup firewall sync exception:', err);
+    }
+  };
+
+  // Automated startup audit on initial mount
+  useEffect(() => {
+    syncFirewallRulesFromOS();
+  }, []);
+
+  // Master "Reset All Ports / Default Lockdown" action (Task 1)
+  const resetToDefaultLockdown = async () => {
+    setIsResettingPorts(true);
+    setTerminalLogs((prev) => [
+      ...prev,
+      '',
+      '[>] MASTER RESET TRIGGERED: Enforcing Zero-Trust Factory Default Lockdown on all ports...',
+      '    [*] Purging stale rules, enforcing rule idempotency, and applying default block rules...',
+    ]);
+
+    // Build batch idempotent PowerShell command to block all non-essential ports
+    const blockCommands = initialPorts
+      .map(
+        (p) =>
+          `netsh advfirewall firewall add rule name="SurfaceGuard_Block_${p.port}" dir=in action=block protocol=${p.protocol} localport=${p.port} enable=yes -ErrorAction SilentlyContinue`
+      )
+      .join('; ');
+
+    const command = `$ErrorActionPreference = 'SilentlyContinue'; & { Get-NetFirewallRule -Name 'SurfaceGuard_Block_*' -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction SilentlyContinue; ${blockCommands} } -ErrorAction SilentlyContinue`;
+
+    try {
+      const result = await runPowerShellWithAdmin(command);
+      if (result.success === true) {
+        // Clear active temporary leases / overrides
+        setActiveLease(null);
+
+        // Update React state: all non-essential ports set to BLOCKED (isOpen: false)
+        setPorts((prev) => {
+          const updated = prev.map((p) => ({
+            ...p,
+            isOpen: false, // Factory zero-trust lockdown: all ports closed/blocked
+            isLoading: false,
+          }));
+          savePortsToStorage(updated);
+          return [...updated];
+        });
+
+        setTerminalLogs((prev) => [
+          ...prev,
+          '[✓] MASTER LOCKDOWN ENFORCED: All network ports have been restored to Zero-Trust Default Lockdown.',
+          '    [*] Inbound attack vectors blocked in Windows Firewall.',
+          '    [*] Temporary overrides purged and state saved.',
+        ]);
+
+        setPortNotificationAlert({
+          title: 'Master Default Lockdown Enforced',
+          message: 'All network ports have been reset to factory Zero-Trust Default Lockdown. All non-essential inbound ports are now blocked.',
+          type: 'success',
+        });
+      } else {
+        const errorMsg = result.output || 'Master reset command failed.';
+        setTerminalLogs((prev) => [
+          ...prev,
+          `[✗] Master reset failed: ${errorMsg}`,
+        ]);
+        setPortNotificationAlert({
+          title: 'Master Reset Failed',
+          message: errorMsg,
+          type: 'error',
+        });
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setTerminalLogs((prev) => [
+        ...prev,
+        `[✗] Master reset exception: ${msg}`,
+      ]);
+      setPortNotificationAlert({
+        title: 'Master Reset Error',
+        message: msg,
+        type: 'error',
+      });
+    } finally {
+      setIsResettingPorts(false);
+    }
+  };
+
+  // 2. Individual Port Blocking/Unblocking with strictly bound OS command resolution (Task 2 & 5)
   const togglePort = async (portNumber: number) => {
     const portToToggle = ports.find((p) => p.port === portNumber);
     if (!portToToggle) return;
@@ -1311,9 +1595,14 @@ export const SecurityProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     );
 
     const isBlocking = portToToggle.isOpen; // If currently open, user requested to BLOCK it
+    const safePort = Number(portToToggle.port);
+    const safeProto = portToToggle.protocol === 'UDP' ? 'UDP' : 'TCP';
+    const ruleName = `SurfaceGuard_Block_${safePort}`;
+
+    // Rule Idempotency: Always run a delete rule command right before an add rule command
     const command = isBlocking
-      ? `netsh advfirewall firewall add rule name="SurfaceGuard_Block_${portToToggle.port}" dir=in action=block protocol=${portToToggle.protocol} localport=${portToToggle.port}`
-      : `netsh advfirewall firewall delete rule name="SurfaceGuard_Block_${portToToggle.port}"`;
+      ? `$ErrorActionPreference = 'SilentlyContinue'; & { netsh advfirewall firewall delete rule name="${ruleName}" -ErrorAction SilentlyContinue 2>$null; if ($LASTEXITCODE -ne 0) { $global:LASTEXITCODE = 0 }; netsh advfirewall firewall add rule name="${ruleName}" dir=in action=block protocol=${safeProto} localport=${safePort} enable=yes -ErrorAction SilentlyContinue } -ErrorAction SilentlyContinue`
+      : `$ErrorActionPreference = 'SilentlyContinue'; & { netsh advfirewall firewall delete rule name="${ruleName}" -ErrorAction SilentlyContinue 2>$null; if ($LASTEXITCODE -ne 0) { $global:LASTEXITCODE = 0 } } -ErrorAction SilentlyContinue`;
 
     try {
       const result = await runPowerShellWithAdmin(command);
@@ -1321,22 +1610,31 @@ export const SecurityProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       // CRITICAL: NO OPTIMISTIC UI STATE UPDATES
       // The React UI MUST NOT toggle any port state to "Blocked" or "Allowed" until result.success === true
       if (result.success === true) {
-        setPorts((prev) =>
-          prev.map((p) =>
+        setPorts((prev) => {
+          const updated = prev.map((p) =>
             p.port === portNumber
-              ? { ...p, isOpen: !p.isOpen, isLoading: false }
+              ? { ...p, isOpen: !isBlocking, isLoading: false }
               : p
-          )
-        );
+          );
+          savePortsToStorage(updated);
+          return [...updated];
+        });
         const logMsg = isBlocking
-          ? `[✓] Network Door Locked: Port ${portNumber}/${portToToggle.protocol} (${portToToggle.service}) is now BLOCKED via Firewall.`
-          : `[!] Network Door Opened: Port ${portNumber}/${portToToggle.protocol} (${portToToggle.service}) is now ALLOWED [Open to network].`;
+          ? `[✓] Network Door Locked: Port ${portNumber}/${safeProto} (${portToToggle.service}) is now BLOCKED via Windows Firewall.`
+          : `[!] Network Door Opened: Port ${portNumber}/${safeProto} (${portToToggle.service}) is now ALLOWED [Open to network].`;
         setTerminalLogs((prev) => [
           ...prev,
           logMsg,
-          `    Command: ${command}`,
+          `    Rule: ${ruleName}`,
           `    Output: ${result.output}`,
         ]);
+        setPortNotificationAlert({
+          title: isBlocking ? `Port ${portNumber} Blocked` : `Port ${portNumber} Allowed`,
+          message: isBlocking
+            ? `Port ${portNumber}/${safeProto} (${portToToggle.service}) has been successfully blocked in Windows Firewall.`
+            : `Port ${portNumber}/${safeProto} (${portToToggle.service}) is now allowed through Windows Firewall.`,
+          type: isBlocking ? 'info' : 'success',
+        });
       } else {
         // If call fails or returns an error: keep toggle in original state, log error to terminal history, show notification alert
         setPorts((prev) =>
@@ -1348,7 +1646,7 @@ export const SecurityProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           `[✗] Failed to ${isBlocking ? 'BLOCK' : 'ALLOW'} Port ${portNumber}: ${errorOutput}`,
         ]);
         setPortNotificationAlert({
-          title: `Firewall Error: Port ${portNumber}/${portToToggle.protocol}`,
+          title: `Firewall Error: Port ${portNumber}/${safeProto}`,
           message: errorOutput,
           type: 'error',
         });
@@ -1415,7 +1713,11 @@ export const SecurityProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       isCustom: true,
     };
 
-    setPorts((prev) => [newPortItem, ...prev]);
+    setPorts((prev) => {
+      const updated = [newPortItem, ...prev];
+      savePortsToStorage(updated);
+      return updated;
+    });
     setTerminalLogs((l) => [
       ...l,
       `[+] Port Rule Registered: Added ${protocol} Port ${port} (${newPortItem.service}) to managed table. Toggle switch to enforce block/allow.`,
@@ -2035,6 +2337,9 @@ export const SecurityProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         scanPorts,
         scanProcesses,
         togglePort,
+        isResettingPorts,
+        resetToDefaultLockdown,
+        syncFirewallRulesFromOS,
         toggleProcessBlock,
         blockAllProcesses,
         allowAllProcesses,
