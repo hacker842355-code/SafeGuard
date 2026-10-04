@@ -35,6 +35,7 @@ export const ProcessBlocker: React.FC = () => {
   const [showAddModal, setShowAddModal] = useState<boolean>(false);
   const [customName, setCustomName] = useState<string>('');
   const [customPath, setCustomPath] = useState<string>('');
+  const [validationError, setValidationError] = useState<string>('');
 
   const blockedCount = processes.filter((p) => p.isBlocked).length;
   const telemetryCount = processes.filter((p) => p.type === 'TELEMETRY' || p.type === 'UPDATER').length;
@@ -54,13 +55,41 @@ export const ProcessBlocker: React.FC = () => {
 
   const handleAddSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (customName.trim()) {
-      const added = await addCustomProcess(customName.trim(), customPath.trim() || undefined);
-      if (added) {
-        setCustomName('');
-        setCustomPath('');
-        setShowAddModal(false);
+    setValidationError('');
+    const rawName = customName.trim();
+    if (!rawName) {
+      setValidationError('Executable name is required.');
+      return;
+    }
+
+    // Reject quotes, semicolons, backticks, or shell command separators
+    if (/['"`$;|&<>(){}\r\n]/.test(rawName)) {
+      setValidationError('Executable name contains invalid characters (quotes, semicolons, backticks, or shell metacharacters).');
+      return;
+    }
+
+    const baseName = /[/\\]/.test(rawName) ? rawName.split(/[\\/]/).pop() || rawName : rawName;
+    const exeName = baseName.toLowerCase().endsWith('.exe') ? baseName : `${baseName}.exe`;
+
+    // Apply regex whitelist for process names: /^[a-zA-Z0-9_\-\.]+\.exe$/i
+    if (!/^[a-zA-Z0-9_\-\.]+\.exe$/i.test(exeName) || exeName.length <= 4) {
+      setValidationError('Executable name must be alphanumeric with standard dots/hyphens/underscores, ending with .exe.');
+      return;
+    }
+
+    if (customPath.trim()) {
+      if (/['"`$;|&<>{}\r\n]/.test(customPath.trim())) {
+        setValidationError('Path contains invalid shell characters (quotes, semicolons, or shell metacharacters).');
+        return;
       }
+    }
+
+    const added = await addCustomProcess(rawName, customPath.trim() || undefined);
+    if (added) {
+      setCustomName('');
+      setCustomPath('');
+      setValidationError('');
+      setShowAddModal(false);
     }
   };
 
@@ -285,7 +314,10 @@ export const ProcessBlocker: React.FC = () => {
               </h3>
               <button
                 type="button"
-                onClick={() => setShowAddModal(false)}
+                onClick={() => {
+                  setShowAddModal(false);
+                  setValidationError('');
+                }}
                 className="text-slate-400 hover:text-white"
               >
                 <X className="w-4 h-4" />
@@ -293,6 +325,13 @@ export const ProcessBlocker: React.FC = () => {
             </div>
 
             <div className="space-y-3 text-xs">
+              {validationError && (
+                <div className="p-2.5 rounded-lg bg-red-950/80 border border-red-800 text-red-200 text-[11px] flex items-center gap-2">
+                  <AlertTriangle className="w-3.5 h-3.5 text-red-400 shrink-0" />
+                  <span>{validationError}</span>
+                </div>
+              )}
+
               <div className="space-y-1">
                 <label className="text-slate-300 font-semibold">
                   Executable Name
@@ -324,7 +363,10 @@ export const ProcessBlocker: React.FC = () => {
             <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-800/80">
               <button
                 type="button"
-                onClick={() => setShowAddModal(false)}
+                onClick={() => {
+                  setShowAddModal(false);
+                  setValidationError('');
+                }}
                 className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold rounded-lg transition-colors"
               >
                 Cancel

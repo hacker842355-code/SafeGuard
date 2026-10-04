@@ -24,7 +24,7 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.cjs'),
       nodeIntegration: false,
       contextIsolation: true,
-      sandbox: false,
+      sandbox: true,
     },
     autoHideMenuBar: true,
   });
@@ -69,36 +69,106 @@ app.on('window-all-closed', () => {
   }
 });
 
+// Security: Command Validation & Sanitization Policy
+const FORBIDDEN_COMMAND_PATTERNS = [
+  /\b(invoke-webrequest|invoke-restmethod|iwr|irm|downloadfile|downloadstring|net\.webclient|start-bitstransfer|bitsadmin)\b/i,
+  /\b(start-process|invoke-expression|iex|cmd\.exe|powershell\.exe|pwsh\.exe|mshta|rundll32|regsvr32|cscript|wscript|bash|sh)\b/i,
+  /\b(add-type|system\.reflection|system\.runtime\.interopservices|system\.activator)\b/i,
+  /-e(nc(odedcommand)?)?\b/i,
+  /\b(format-volume|diskpart|bcdedit)\b/i,
+];
+
+const ALLOWED_COMMAND_SIGNATURES = [
+  /netsh(\.exe)?\s+advfirewall/i,
+  /set-itemproperty/i,
+  /new-item/i,
+  /get-pnpdevice/i,
+  /disable-pnpdevice/i,
+  /enable-pnpdevice/i,
+  /icacls/i,
+  /get-netfirewallrule/i,
+  /get-netfirewallportfilter/i,
+  /get-nettcpconnection/i,
+  /get-netudpendpoint/i,
+  /get-process/i,
+  /get-ciminstance/i,
+  /write-host/i,
+];
+
+function validatePowerShellCommand(command) {
+  if (typeof command !== 'string' || !command.trim()) {
+    return { valid: false, error: 'Command payload must be a non-empty string.' };
+  }
+  if (command.length > 32768) {
+    return { valid: false, error: 'Command payload exceeds maximum allowed size (32KB).' };
+  }
+  for (const pattern of FORBIDDEN_COMMAND_PATTERNS) {
+    if (pattern.test(command)) {
+      return { valid: false, error: 'Command rejected: Contains restricted or potentially dangerous instruction.' };
+    }
+  }
+  const isAllowed = ALLOWED_COMMAND_SIGNATURES.some((sig) => sig.test(command));
+  if (!isAllowed) {
+    return { valid: false, error: 'Command rejected: Operation does not match allowed security hardening profiles.' };
+  }
+  return { valid: true };
+}
+
 // IPC Handler: Execute Windows PowerShell / Netsh Hardening as Administrator
 ipcMain.handle('run-powershell-command', async (event, { command, requireAdmin }) => {
+  // 1. Strict Sender Verification
+  if (!mainWindow || !mainWindow.webContents || event.sender !== mainWindow.webContents) {
+    return { success: false, output: 'Access Denied: Untrusted IPC sender.' };
+  }
+
+  // 2. Strict Input Validation & Sanitization
+  const validation = validatePowerShellCommand(command);
+  if (!validation.valid) {
+    return { success: false, output: validation.error };
+  }
+
   return new Promise((resolve) => {
-    // Write temporary script to %TEMP%
-    const tempScriptPath = path.join(app.getPath('temp'), `surfaceguard_${Date.now()}.ps1`);
-    const resultPath = `${tempScriptPath}.result`;
-    const script = [
-      '$ErrorActionPreference = "SilentlyContinue"',
+    // 3. Parameterized execution via static runner script and Base64 payload
+    const runnerScriptPath = path.join(
+      app.getPath('temp'),
+      `surfaceguard_runner_${Date.now()}_${Math.random().toString(36).substring(2, 8)}.ps1`
+    );
+    const resultPath = `${runnerScriptPath}.result`;
+
+    // Static runner script - ZERO user-supplied string interpolation in template
+    const staticRunnerScript = [
+      '[CmdletBinding()]',
+      'param(',
+      '  [Parameter(Mandatory=$true)]',
+      '  [string]$Base64Payload,',
+      '  [Parameter(Mandatory=$true)]',
+      '  [string]$ResultFile',
+      ')',
+      '$ErrorActionPreference = "Stop"',
       'try {',
-      `  $output = & { ${command} } 2>&1 | Out-String`,
-      `  Set-Content -LiteralPath '${resultPath.replace(/'/g, "''")}' -Value $output -Encoding UTF8`,
+      '  $decodedBytes = [System.Convert]::FromBase64String($Base64Payload)',
+      '  $commandText = [System.Text.Encoding]::UTF8.GetString($decodedBytes)',
+      '  $scriptBlock = [scriptblock]::Create($commandText)',
+      '  $output = & $scriptBlock 2>&1 | Out-String',
+      '  [System.IO.File]::WriteAllText($ResultFile, $output, [System.Text.Encoding]::UTF8)',
       '  exit 0',
-      '}',
-      'catch {',
-      `  $errorOutput = ($_ | Out-String)`,
-      `  Set-Content -LiteralPath '${resultPath.replace(/'/g, "''")}' -Value $errorOutput -Encoding UTF8`,
+      '} catch {',
+      '  $errorOutput = ($_ | Out-String)',
+      '  [System.IO.File]::WriteAllText($ResultFile, $errorOutput, [System.Text.Encoding]::UTF8)',
       '  exit 1',
       '}',
     ].join('\n');
-    fs.writeFileSync(tempScriptPath, script, 'utf8');
 
-    let execCmd;
-    if (requireAdmin) {
-      // Forcing Windows UAC Prompt to run script as Administrator
-      execCmd = `powershell -NoProfile -ExecutionPolicy Bypass -Command "$process = Start-Process powershell -ArgumentList '-NoProfile -ExecutionPolicy Bypass -File \\\"${tempScriptPath}\\\"' -Verb RunAs -Wait -PassThru; exit $process.ExitCode"`;
-    } else {
-      execCmd = `powershell -NoProfile -ExecutionPolicy Bypass -File "${tempScriptPath}"`;
+    try {
+      fs.writeFileSync(runnerScriptPath, staticRunnerScript, 'utf8');
+    } catch (writeErr) {
+      resolve({ success: false, output: `Failed to initialize execution environment: ${writeErr.message}` });
+      return;
     }
 
-    exec(execCmd, (error, stdout, stderr) => {
+    const base64Payload = Buffer.from(command, 'utf8').toString('base64');
+
+    const handleProcessCompletion = (error, stdout, stderr) => {
       let scriptOutput = stdout || stderr || '';
       try {
         if (fs.existsSync(resultPath)) {
@@ -106,18 +176,60 @@ ipcMain.handle('run-powershell-command', async (event, { command, requireAdmin }
         }
       } catch (readError) {
         scriptOutput = `${scriptOutput}\n${readError.message}`.trim();
+      } finally {
+        try { if (fs.existsSync(runnerScriptPath)) fs.unlinkSync(runnerScriptPath); } catch (_) {}
+        try { if (fs.existsSync(resultPath)) fs.unlinkSync(resultPath); } catch (_) {}
       }
 
-      // Clean up temp file
-      try { fs.unlinkSync(tempScriptPath); } catch (e) {}
-      try { fs.unlinkSync(resultPath); } catch (e) {}
-
       if (error) {
-        resolve({ success: false, output: scriptOutput || error.message });
+        if (error.code === 1223 || (error.message && error.message.includes('1223'))) {
+          resolve({ success: false, output: 'Elevation request was cancelled by the user (UAC denied).' });
+        } else {
+          resolve({ success: false, output: scriptOutput || error.message });
+        }
       } else {
         resolve({ success: true, output: scriptOutput || 'Command executed successfully.' });
       }
-    });
+    };
+
+    if (requireAdmin) {
+      // Elevated execution using execFile with direct argv array tokens (no shell string interpolation)
+      const elevatedWrapper = [
+        'param($runner, $b64, $result)',
+        'try {',
+        '  $proc = Start-Process -FilePath "powershell.exe" -ArgumentList @("-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", $runner, "-Base64Payload", $b64, "-ResultFile", $result) -Verb RunAs -Wait -PassThru -ErrorAction Stop',
+        '  exit $proc.ExitCode',
+        '} catch {',
+        '  exit 1223',
+        '}',
+      ].join('\n');
+
+      execFile('powershell.exe', [
+        '-NoProfile',
+        '-NonInteractive',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-Command',
+        elevatedWrapper,
+        runnerScriptPath,
+        base64Payload,
+        resultPath,
+      ], { windowsHide: true, timeout: 60000 }, handleProcessCompletion);
+    } else {
+      // Non-elevated execution via direct argv array tokens
+      execFile('powershell.exe', [
+        '-NoProfile',
+        '-NonInteractive',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-File',
+        runnerScriptPath,
+        '-Base64Payload',
+        base64Payload,
+        '-ResultFile',
+        resultPath,
+      ], { windowsHide: true, timeout: 30000 }, handleProcessCompletion);
+    }
   });
 });
 

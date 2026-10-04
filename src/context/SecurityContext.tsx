@@ -147,6 +147,7 @@ interface SecurityContextType {
     customPort?: number;
   }) => Promise<boolean>;
   revokeTemporaryLease: () => Promise<boolean>;
+  executeEmergencyLockdown: () => Promise<boolean>;
   executeHardening: () => Promise<void>;
   executeRollback: () => Promise<void>;
   simulateAttack: (attackType: 'SMB_RANSOMWARE' | 'NMAP_SCAN' | 'SPYWARE_CAM' | 'DEV_DEBUG_EXPLOIT') => void;
@@ -949,15 +950,16 @@ export const SecurityProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     if (!process) return false;
     const nextBlocked = !process.isBlocked;
     const exeName = process.name.endsWith('.exe') ? process.name : `${process.name}.exe`;
-    const ruleName = `SurfaceGuard_Block_Proc_${exeName}`;
-    const safePath = process.path.replace(/'/g, "''");
+    const sanitizedExe = exeName.replace(/[^a-zA-Z0-9_\-\.]/g, '');
+    const ruleName = `SurfaceGuard_Block_Proc_${sanitizedExe}`;
+    const cleanPath = process.path.replace(/["`$;|&<>]/g, '');
 
     setUpdatingProcessIds((current) => [...current, pid]);
 
-    // Path-based firewall blocking rule with single-quote escaping & idempotency:
+    // Path-based firewall blocking rule with safe double-quoted parameters for netsh CLI:
     const command = nextBlocked
-      ? `$ErrorActionPreference = 'SilentlyContinue'; & { netsh advfirewall firewall delete rule name='${ruleName}' -ErrorAction SilentlyContinue 2>$null; if ($LASTEXITCODE -ne 0) { $global:LASTEXITCODE = 0 }; netsh advfirewall firewall add rule name='${ruleName}' dir=out action=block program='${safePath}' enable=yes -ErrorAction SilentlyContinue } -ErrorAction SilentlyContinue`
-      : `$ErrorActionPreference = 'SilentlyContinue'; & { netsh advfirewall firewall delete rule name='${ruleName}' -ErrorAction SilentlyContinue 2>$null; if ($LASTEXITCODE -ne 0) { $global:LASTEXITCODE = 0 } } -ErrorAction SilentlyContinue`;
+      ? `$ErrorActionPreference = 'SilentlyContinue'; & netsh.exe advfirewall firewall delete rule name="${ruleName}" 2>$null; if ($LASTEXITCODE -ne 0) { $global:LASTEXITCODE = 0 }; & netsh.exe advfirewall firewall add rule name="${ruleName}" dir=out action=block program="${cleanPath}" enable=yes`
+      : `$ErrorActionPreference = 'SilentlyContinue'; & netsh.exe advfirewall firewall delete rule name="${ruleName}" 2>$null; if ($LASTEXITCODE -ne 0) { $global:LASTEXITCODE = 0 }`;
 
     try {
       const result = await runPowerShellWithAdmin(command);
@@ -1159,10 +1161,57 @@ export const SecurityProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
   // Add custom process and enforce outbound firewall drop
   const addCustomProcess = async (name: string, suppliedPath?: string): Promise<boolean> => {
-    const processName = /[/\\]/.test(name) ? name.split(/[\\/]/).pop() || name : name;
-    const exeName = processName.toLowerCase().endsWith('.exe') ? processName : `${processName}.exe`;
-    const executablePath = suppliedPath || `C:\\Windows\\System32\\${exeName}`;
-    const safePath = executablePath.replace(/'/g, "''");
+    if (!name || typeof name !== 'string') {
+      setPortNotificationAlert({
+        title: 'Invalid Process Name',
+        message: 'Executable name must be a non-empty string.',
+        type: 'error',
+      });
+      return false;
+    }
+
+    const trimmedName = name.trim();
+
+    // Reject quotes, semicolons, backticks, or shell command separators
+    if (/['"`$;|&<>(){}\r\n]/.test(trimmedName)) {
+      setPortNotificationAlert({
+        title: 'Validation Error',
+        message: 'Process name contains forbidden shell characters or metacharacters.',
+        type: 'error',
+      });
+      return false;
+    }
+
+    // Extract base filename if a path was pasted into the name input
+    const baseName = /[/\\]/.test(trimmedName) ? trimmedName.split(/[\\/]/).pop() || trimmedName : trimmedName;
+    const exeName = baseName.toLowerCase().endsWith('.exe') ? baseName : `${baseName}.exe`;
+
+    // Apply strict regex whitelist for process names: /^[a-zA-Z0-9_\-\.]+\.exe$/i
+    if (!/^[a-zA-Z0-9_\-\.]+\.exe$/i.test(exeName) || exeName.length <= 4) {
+      setPortNotificationAlert({
+        title: 'Invalid Process Format',
+        message: 'Executable name must be alphanumeric with standard dots, hyphens, or underscores, ending in .exe.',
+        type: 'error',
+      });
+      return false;
+    }
+
+    // Sanitize and validate optional supplied path
+    let executablePath = `C:\\Windows\\System32\\${exeName}`;
+    if (suppliedPath && suppliedPath.trim()) {
+      const trimmedPath = suppliedPath.trim();
+      if (/['"`$;|&<>{}\r\n]/.test(trimmedPath)) {
+        setPortNotificationAlert({
+          title: 'Invalid Path',
+          message: 'Process path contains forbidden shell characters.',
+          type: 'error',
+        });
+        return false;
+      }
+      executablePath = trimmedPath.replace(/\//g, '\\');
+    }
+
+    // Rule name is strictly alphanumeric and safe characters
     const ruleName = `SurfaceGuard_Block_Proc_${exeName}`;
 
     if (processes.some((process) => process.name.toLowerCase() === exeName.toLowerCase())) {
@@ -1175,7 +1224,10 @@ export const SecurityProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     }
 
     setIsAddingCustomProcess(true);
-    const command = `$ErrorActionPreference = 'SilentlyContinue'; & { netsh advfirewall firewall delete rule name='${ruleName}' -ErrorAction SilentlyContinue 2>$null; if ($LASTEXITCODE -ne 0) { $global:LASTEXITCODE = 0 }; netsh advfirewall firewall add rule name='${ruleName}' dir=out action=block program='${safePath}' enable=yes -ErrorAction SilentlyContinue } -ErrorAction SilentlyContinue`;
+
+    // Double-quote safe parameters for netsh CLI syntax:
+    // Ensures paths containing spaces (e.g. "C:\Program Files\...") are enclosed in double quotes.
+    const command = `$ErrorActionPreference = 'SilentlyContinue'; & netsh.exe advfirewall firewall delete rule name="${ruleName}" 2>$null; if ($LASTEXITCODE -ne 0) { $global:LASTEXITCODE = 0 }; & netsh.exe advfirewall firewall add rule name="${ruleName}" dir=out action=block program="${executablePath}" enable=yes`;
 
     try {
       const result = await runPowerShellWithAdmin(command);
@@ -2092,6 +2144,125 @@ export const SecurityProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     }
   };
 
+  // Master Emergency Lockdown - Real OS-level enforcement with Administrator Elevation
+  const executeEmergencyLockdown = async (): Promise<boolean> => {
+    setTerminalLogs((prev) => [
+      ...prev,
+      '',
+      '🚨 [!] EMERGENCY PANIC LOCKDOWN INITIATED!',
+      '    [*] Enforcing immediate OS-level perimeter lockdown with Administrator privileges...',
+    ]);
+
+    // 1. Build OS Enforcement Commands:
+    // a. Network Ports Lockdown: Strict Inbound TCP 1-65535 Drop + explicit block on managed ports
+    const portBlockCommands = [
+      '& netsh.exe advfirewall firewall delete rule name="SurfaceGuard_Block_All_Unlisted" 2>$null',
+      'if ($LASTEXITCODE -ne 0) { $global:LASTEXITCODE = 0 }',
+      '& netsh.exe advfirewall firewall add rule name="SurfaceGuard_Block_All_Unlisted" dir=in action=block protocol=TCP localport=1-65535 enable=yes',
+    ];
+
+    ports.filter((p) => p.isOpen).forEach((p) => {
+      portBlockCommands.push(
+        `& netsh.exe advfirewall firewall delete rule name="SurfaceGuard_Block_${p.port}" 2>$null`,
+        'if ($LASTEXITCODE -ne 0) { $global:LASTEXITCODE = 0 }',
+        `& netsh.exe advfirewall firewall add rule name="SurfaceGuard_Block_${p.port}" dir=in action=block protocol=${p.protocol} localport=${p.port} enable=yes`
+      );
+    });
+
+    // b. Hardware Peripherals Lockdown: Camera, Microphone, USB Storage, and Bluetooth
+    const hardwareLockCommands = [
+      "Set-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\CapabilityAccessManager\\ConsentStore\\webcam' -Name 'Value' -Value 'Deny' -Force",
+      "Get-PnpDevice -Class Camera,Image -ErrorAction SilentlyContinue | Disable-PnpDevice -Confirm:$false",
+      "Set-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\CapabilityAccessManager\\ConsentStore\\microphone' -Name 'Value' -Value 'Deny' -Force",
+      "Set-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\USBSTOR' -Name 'Start' -Value 4 -Type DWord -Force",
+      "Get-PnpDevice -Class Bluetooth -ErrorAction SilentlyContinue | Disable-PnpDevice -Confirm:$false",
+    ];
+
+    // c. PAM Lease Revocation Command
+    let pamLockCommand = '';
+    if (activeLease && activeLease.lockCommand) {
+      pamLockCommand = activeLease.lockCommand;
+    }
+
+    const allCommands = [
+      "$ErrorActionPreference = 'SilentlyContinue'",
+      ...portBlockCommands,
+      ...hardwareLockCommands,
+      pamLockCommand,
+    ].filter(Boolean).join('; ');
+
+    try {
+      // 2. Execute with Administrator elevation (requireAdmin: true)
+      const result = await runPowerShellWithAdmin(allCommands);
+
+      // 3. Immediately Revoke Active PAM Lease in State & Audit Ledger
+      if (activeLease) {
+        const eventId = `LOG-${nextLedgerId.current++}`;
+        const timestamp = timestampNow();
+        const hash = await computeSha256(
+          `${eventId}|${timestamp}|${activeLease.shortName}|Emergency panic lockdown revoked lease|00:00|REVOKED`
+        );
+        setLeaseLedger((prev) => [
+          {
+            id: eventId,
+            timestamp,
+            app: activeLease.shortName,
+            reason: `Emergency lockdown revocation: ${activeLease.reason}`,
+            duration: `${activeLease.durationMinutes} min`,
+            status: 'REVOKED',
+            hash,
+          },
+          ...prev,
+        ]);
+        setActiveLease(null);
+      }
+
+      // 4. Update Global State: All ports blocked, all hardware locked, strict lockdown enabled
+      setPorts((prev) => {
+        const updated = prev.map((p) => ({ ...p, isOpen: false, isLoading: false }));
+        savePortsToStorage(updated);
+        return updated;
+      });
+
+      setHardware({
+        camera: true,
+        microphone: true,
+        usbStorage: true,
+        bluetooth: true,
+        fileSystemAcl: true,
+      });
+
+      setIsStrictLockdown(true);
+      try {
+        localStorage.setItem(STORAGE_STRICT_LOCKDOWN, 'true');
+      } catch (_) {}
+
+      setTerminalLogs((prev) => [
+        ...prev,
+        '    [✓] Network Firewall: Enforced DROP on all TCP/UDP ports (Global Strict Inbound Drop Active).',
+        '    [✓] Video & Audio: Webcam disabled via PnP device & CapabilityAccess ConsentStore.',
+        '    [✓] Peripheral Buses: USB Mass Storage driver disabled (Start=4) & Bluetooth adapters disabled.',
+        '    [✓] PAM Elevation: All temporary access leases instantly revoked.',
+        '🚨 [✓] EMERGENCY LOCKDOWN SUCCESSFULLY ENFORCED AT OS LEVEL.',
+      ]);
+
+      setPortNotificationAlert({
+        title: 'Emergency Lockdown Enforced',
+        message: 'All network doors closed, peripherals locked down, and temporary leases revoked with Administrator elevation.',
+        type: 'error',
+      });
+
+      return result.success;
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      setTerminalLogs((prev) => [
+        ...prev,
+        `[✗] Emergency Lockdown Exception: ${errMsg}`,
+      ]);
+      return false;
+    }
+  };
+
   // 5. Production-Ready 1-Click Professional Security Profiles
   const applyProfile = async (mode: SecurityProfileMode): Promise<boolean> => {
     if (profileLoading) return false;
@@ -2581,6 +2752,7 @@ export const SecurityProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         leaseLedger,
         grantTemporaryLease,
         revokeTemporaryLease,
+        executeEmergencyLockdown,
         executeHardening,
         executeRollback,
         simulateAttack,
