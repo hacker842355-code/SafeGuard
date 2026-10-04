@@ -17,6 +17,7 @@ export interface PortNotificationAlert {
 }
 
 export interface ActiveLease {
+  leaseId?: string;
   appId: string;
   shortName: string;
   label: string;
@@ -1437,7 +1438,7 @@ export const SecurityProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     }, 1000);
 
     return () => clearInterval(timer);
-  }, [activeLease ? activeLease.appId : null]);
+  }, [activeLease ? (activeLease.leaseId || `${activeLease.appId}_${activeLease.startedAt}`) : null]);
 
   // 1c. Master Control: "Strict Lockdown (Block All Unlisted Ports)"
   const toggleStrictLockdown = async () => {
@@ -1888,6 +1889,63 @@ export const SecurityProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   }): Promise<boolean> => {
     setIsLeaseLoading(true);
 
+    // RULE 1 & 2: Check if activeLease already exists before assigning a new lease.
+    // If active, execute existing lockCommand immediately to reset hardware/port access and prevent permission leaks.
+    if (activeLease) {
+      setTerminalLogs((l) => [
+        ...l,
+        `[!] OVERLAPPING LEASE DETECTED: Revoking prior active lease (${activeLease.shortName}) to prevent permission leak...`,
+      ]);
+
+      if (activeLease.lockCommand) {
+        try {
+          await runPowerShellWithAdmin(activeLease.lockCommand);
+        } catch (revokeErr) {
+          console.error('Failed to revoke previous lease lock command:', revokeErr);
+        }
+      }
+
+      if (activeLease.affectedDevices) {
+        setHardware((prev) => {
+          const next = { ...prev };
+          activeLease.affectedDevices!.forEach((d) => {
+            next[d] = true; // true = LOCKED
+          });
+          return next;
+        });
+      }
+
+      if (activeLease.affectedPorts) {
+        setPorts((prev) =>
+          prev.map((p) =>
+            activeLease.affectedPorts!.includes(p.port) ? { ...p, isOpen: false } : p
+          )
+        );
+      }
+
+      const prevEventId = `LOG-${nextLedgerId.current++}`;
+      const prevTimestamp = timestampNow();
+      const prevHash = await computeSha256(
+        `${prevEventId}|${prevTimestamp}|${activeLease.shortName}|Superceded by new lease|${formatRemaining(activeLease.remainingSeconds)}|REVOKED`
+      );
+
+      setLeaseLedger((prev) => [
+        {
+          id: prevEventId,
+          timestamp: prevTimestamp,
+          app: activeLease.shortName,
+          reason: `Superceded by ${params.shortName} lease: ${activeLease.reason}`,
+          duration: formatRemaining(activeLease.remainingSeconds),
+          status: 'REVOKED',
+          hash: prevHash,
+        },
+        ...prev,
+      ]);
+
+      // Clear previous lease state so interval is cleanly unmounted
+      setActiveLease(null);
+    }
+
     let unlockCommand = '';
     let lockCommand = '';
     let affectedDevices: (keyof HardwareState)[] | undefined = undefined;
@@ -1919,45 +1977,47 @@ export const SecurityProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       case 'vite':
       case 'vscode_dev':
         affectedPorts = [8000, 5173];
-        unlockCommand = "netsh advfirewall firewall delete rule name='SurfaceGuard_Block_8000'; netsh advfirewall firewall delete rule name='SurfaceGuard_Block_5173'";
-        lockCommand = "netsh advfirewall firewall add rule name='SurfaceGuard_Block_8000' dir=in action=block protocol=TCP localport=8000; netsh advfirewall firewall add rule name='SurfaceGuard_Block_5173' dir=in action=block protocol=TCP localport=5173";
+        unlockCommand = 'netsh.exe advfirewall firewall delete rule name="SurfaceGuard_Block_8000" 2>$null; netsh.exe advfirewall firewall delete rule name="SurfaceGuard_Block_5173" 2>$null';
+        lockCommand = 'netsh.exe advfirewall firewall add rule name="SurfaceGuard_Block_8000" dir=in action=block protocol=TCP localport=8000 enable=yes; netsh.exe advfirewall firewall add rule name="SurfaceGuard_Block_5173" dir=in action=block protocol=TCP localport=5173 enable=yes';
         break;
 
       case 'debugger':
       case 'node_debug':
         affectedPorts = [9229];
-        unlockCommand = "netsh advfirewall firewall delete rule name='SurfaceGuard_Block_9229'";
-        lockCommand = "netsh advfirewall firewall add rule name='SurfaceGuard_Block_9229' dir=in action=block protocol=TCP localport=9229";
+        unlockCommand = 'netsh.exe advfirewall firewall delete rule name="SurfaceGuard_Block_9229" 2>$null';
+        lockCommand = 'netsh.exe advfirewall firewall add rule name="SurfaceGuard_Block_9229" dir=in action=block protocol=TCP localport=9229 enable=yes';
         break;
 
       case 'ssh':
       case 'ssh_support':
         affectedPorts = [22];
-        unlockCommand = "netsh advfirewall firewall delete rule name='SurfaceGuard_Block_22'";
-        lockCommand = "netsh advfirewall firewall add rule name='SurfaceGuard_Block_22' dir=in action=block protocol=TCP localport=22";
+        unlockCommand = 'netsh.exe advfirewall firewall delete rule name="SurfaceGuard_Block_22" 2>$null';
+        lockCommand = 'netsh.exe advfirewall firewall add rule name="SurfaceGuard_Block_22" dir=in action=block protocol=TCP localport=22 enable=yes';
         break;
 
       case 'rdp':
       case 'rdp_support':
         affectedPorts = [3389];
-        unlockCommand = "netsh advfirewall firewall delete rule name='SurfaceGuard_Block_3389'";
-        lockCommand = "netsh advfirewall firewall add rule name='SurfaceGuard_Block_3389' dir=in action=block protocol=TCP localport=3389";
+        unlockCommand = 'netsh.exe advfirewall firewall delete rule name="SurfaceGuard_Block_3389" 2>$null';
+        lockCommand = 'netsh.exe advfirewall firewall add rule name="SurfaceGuard_Block_3389" dir=in action=block protocol=TCP localport=3389 enable=yes';
         break;
 
       case 'smb':
       case 'smb_drive':
         affectedPorts = [445];
-        unlockCommand = "netsh advfirewall firewall delete rule name='SurfaceGuard_Block_445'";
-        lockCommand = "netsh advfirewall firewall add rule name='SurfaceGuard_Block_445' dir=in action=block protocol=TCP localport=445";
+        unlockCommand = 'netsh.exe advfirewall firewall delete rule name="SurfaceGuard_Block_445" 2>$null';
+        lockCommand = 'netsh.exe advfirewall firewall add rule name="SurfaceGuard_Block_445" dir=in action=block protocol=TCP localport=445 enable=yes';
         break;
 
       case 'custom':
       case 'custom_port':
       default: {
-        const port = params.customPort || 8080;
+        const port = typeof params.customPort === 'number' && Number.isInteger(params.customPort) && params.customPort >= 1 && params.customPort <= 65535
+          ? params.customPort
+          : 8080;
         affectedPorts = [port];
-        unlockCommand = `netsh advfirewall firewall delete rule name='SurfaceGuard_Block_${port}'`;
-        lockCommand = `netsh advfirewall firewall add rule name='SurfaceGuard_Block_${port}' dir=in action=block protocol=TCP localport=${port}`;
+        unlockCommand = `netsh.exe advfirewall firewall delete rule name="SurfaceGuard_Block_${port}" 2>$null`;
+        lockCommand = `netsh.exe advfirewall firewall add rule name="SurfaceGuard_Block_${port}" dir=in action=block protocol=TCP localport=${port} enable=yes`;
         break;
       }
     }
@@ -2017,8 +2077,10 @@ export const SecurityProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       const totalSecs = params.durationMinutes * 60;
       const startedAt = new Date().toLocaleTimeString();
       const expiresAt = new Date(Date.now() + totalSecs * 1000).toLocaleTimeString() + ' UTC';
+      const uniqueLeaseId = `lease_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
       const newLease: ActiveLease = {
+        leaseId: uniqueLeaseId,
         appId: params.appId,
         label: params.label,
         shortName: params.shortName,
@@ -2034,6 +2096,7 @@ export const SecurityProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         lockCommand,
       };
 
+      // RULE 3: Assigning new lease with unique leaseId cleanly re-arms the auto-lockdown countdown interval
       setActiveLease(newLease);
 
       const eventId = `LOG-${nextLedgerId.current++}`;
