@@ -182,8 +182,20 @@ ipcMain.handle('run-powershell-command', async (event, { command, requireAdmin }
       }
 
       if (error) {
-        if (error.code === 1223 || (error.message && error.message.includes('1223'))) {
-          resolve({ success: false, output: 'Elevation request was cancelled by the user (UAC denied).' });
+        const errorText = `${error.message || ''} ${scriptOutput}`.toLowerCase();
+        const isUacCanceled =
+          error.code === 1223 ||
+          error.code === 0x800704c7 ||
+          errorText.includes('1223') ||
+          errorText.includes('0x800704c7') ||
+          errorText.includes('canceled by the user') ||
+          errorText.includes('cancelled by the user');
+
+        if (isUacCanceled) {
+          resolve({
+            success: false,
+            output: 'Execution canceled: Windows Administrator UAC prompt was denied.',
+          });
         } else {
           resolve({ success: false, output: scriptOutput || error.message });
         }
@@ -192,43 +204,54 @@ ipcMain.handle('run-powershell-command', async (event, { command, requireAdmin }
       }
     };
 
-    if (requireAdmin) {
-      // Elevated execution using execFile with direct argv array tokens (no shell string interpolation)
-      const elevatedWrapper = [
-        'param($runner, $b64, $result)',
-        'try {',
-        '  $proc = Start-Process -FilePath "powershell.exe" -ArgumentList @("-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", $runner, "-Base64Payload", $b64, "-ResultFile", $result) -Verb RunAs -Wait -PassThru -ErrorAction Stop',
-        '  exit $proc.ExitCode',
-        '} catch {',
-        '  exit 1223',
-        '}',
-      ].join('\n');
+    try {
+      if (requireAdmin) {
+        // Elevated execution using execFile with direct argv array tokens (no shell string interpolation)
+        const elevatedWrapper = [
+          'param($runner, $b64, $result)',
+          'try {',
+          '  $proc = Start-Process -FilePath "powershell.exe" -ArgumentList @("-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", $runner, "-Base64Payload", $b64, "-ResultFile", $result) -Verb RunAs -Wait -PassThru -ErrorAction Stop',
+          '  exit $proc.ExitCode',
+          '} catch {',
+          '  $ex = $_.Exception',
+          '  $isUacCanceled = ($ex.HResult -eq [int]0x800704C7) -or ($ex.NativeErrorCode -eq 1223) -or ($_.ToString() -match "0x800704C7|canceled by the user|1223")',
+          '  if ($isUacCanceled) {',
+          '    exit 1223',
+          '  }',
+          '  $errStr = $_ | Out-String',
+          '  [System.IO.File]::WriteAllText($result, $errStr, [System.Text.Encoding]::UTF8)',
+          '  exit 1',
+          '}',
+        ].join('\n');
 
-      execFile('powershell.exe', [
-        '-NoProfile',
-        '-NonInteractive',
-        '-ExecutionPolicy',
-        'Bypass',
-        '-Command',
-        elevatedWrapper,
-        runnerScriptPath,
-        base64Payload,
-        resultPath,
-      ], { windowsHide: true, timeout: 60000 }, handleProcessCompletion);
-    } else {
-      // Non-elevated execution via direct argv array tokens
-      execFile('powershell.exe', [
-        '-NoProfile',
-        '-NonInteractive',
-        '-ExecutionPolicy',
-        'Bypass',
-        '-File',
-        runnerScriptPath,
-        '-Base64Payload',
-        base64Payload,
-        '-ResultFile',
-        resultPath,
-      ], { windowsHide: true, timeout: 30000 }, handleProcessCompletion);
+        execFile('powershell.exe', [
+          '-NoProfile',
+          '-NonInteractive',
+          '-ExecutionPolicy',
+          'Bypass',
+          '-Command',
+          elevatedWrapper,
+          runnerScriptPath,
+          base64Payload,
+          resultPath,
+        ], { windowsHide: true, timeout: 60000 }, handleProcessCompletion);
+      } else {
+        // Non-elevated execution via direct argv array tokens
+        execFile('powershell.exe', [
+          '-NoProfile',
+          '-NonInteractive',
+          '-ExecutionPolicy',
+          'Bypass',
+          '-File',
+          runnerScriptPath,
+          '-Base64Payload',
+          base64Payload,
+          '-ResultFile',
+          resultPath,
+        ], { windowsHide: true, timeout: 30000 }, handleProcessCompletion);
+      }
+    } catch (execError) {
+      handleProcessCompletion(execError, '', '');
     }
   });
 });

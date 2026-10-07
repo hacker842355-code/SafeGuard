@@ -122,8 +122,9 @@ public class ZeroTrustEdrEngine {
             );
             pb.redirectErrorStream(true);
 
+            Process p = null;
             try {
-                Process p = pb.start();
+                p = pb.start();
                 try (BufferedReader reader = new BufferedReader(new InputStreamReader(p.getInputStream()))) {
                     String line;
                     boolean isHeader = true;
@@ -155,8 +156,14 @@ public class ZeroTrustEdrEngine {
                         }
                     }
                 }
-                p.waitFor(5, TimeUnit.SECONDS);
+                boolean finished = p.waitFor(5, TimeUnit.SECONDS);
+                if (!finished) {
+                    p.destroyForcibly();
+                }
             } catch (Exception e) {
+                if (p != null && p.isAlive()) {
+                    p.destroyForcibly();
+                }
                 System.err.println("[ERROR] Windows process scan failed: " + e.getMessage());
             }
         }
@@ -241,12 +248,18 @@ public class ZeroTrustEdrEngine {
                 "enable=yes"
             );
 
+            Process p = null;
             try {
                 ProcessBuilder pb = new ProcessBuilder(command);
                 pb.redirectErrorStream(true);
-                Process p = pb.start();
+                p = pb.start();
                 boolean finished = p.waitFor(5, TimeUnit.SECONDS);
-                if (finished && p.exitValue() == 0) {
+                if (!finished) {
+                    p.destroyForcibly();
+                    System.err.println("[!] [FIREWALL TIMEOUT] Firewall command timed out.");
+                    return false;
+                }
+                if (p.exitValue() == 0) {
                     System.out.println("[✓] [FIREWALL BLOCKED] Windows Defender Firewall DROP enforced for: " + ruleIdentifier);
                     return true;
                 } else {
@@ -254,6 +267,9 @@ public class ZeroTrustEdrEngine {
                     return false;
                 }
             } catch (Exception e) {
+                if (p != null && p.isAlive()) {
+                    p.destroyForcibly();
+                }
                 System.err.println("[!] Exception creating firewall rule: " + e.getMessage());
                 return false;
             }
@@ -269,8 +285,8 @@ public class ZeroTrustEdrEngine {
     // MODULE 3: ZERO-TRUST AUTHORIZATION ENGINE (Default-Deny Rule Module)
     // ==========================================================================
     public static class ZeroTrustEngine {
-        private final Set<String> whitelistedHashes = new HashSet<>();
-        private final Set<Long> authorizedPids = new ConcurrentHashMap<Long, Boolean>().keySet(true);
+        private final Set<String> whitelistedHashes = ConcurrentHashMap.newKeySet();
+        private final Set<Long> authorizedPids = ConcurrentHashMap.newKeySet();
         private final Map<String, String> activeFirewallBlocks = new ConcurrentHashMap<>();
 
         public ZeroTrustEngine() {
