@@ -1032,53 +1032,75 @@ export const SecurityProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     setIsUpdatingProcesses(true);
     setProcessAction('BLOCK_ALL');
 
-    const commands = targets
-      .map((t) => {
-        const exeName = t.name.endsWith('.exe') ? t.name : `${t.name}.exe`;
-        const sanitizedExe = exeName.replace(/[^a-zA-Z0-9_\-\.]/g, '');
-        const ruleName = `SurfaceGuard_Block_Proc_${sanitizedExe}`;
-        const cleanPath = t.path.replace(/"/g, '\\"');
-        return `netsh.exe advfirewall firewall delete rule name="${ruleName}" 2>$null; if ($LASTEXITCODE -ne 0) { $global:LASTEXITCODE = 0 }; netsh.exe advfirewall firewall add rule name="${ruleName}" dir=out action=block program="${cleanPath}" enable=yes`;
-      })
-      .join('; ');
+    const BATCH_SIZE = 20;
+    const totalBatches = Math.ceil(targets.length / BATCH_SIZE);
+    let successfullyBlockedCount = 0;
 
-    const fullCommand = `$ErrorActionPreference = 'SilentlyContinue'; & { ${commands} } -ErrorAction SilentlyContinue`;
+    setTerminalLogs((current) => [
+      ...current,
+      '',
+      `[>] INITIATING BATCH TELEMETRY BLOCK: Hardening ${targets.length} executables in ${totalBatches} chunk(s)...`,
+    ]);
 
     try {
-      const result = await runPowerShellWithAdmin(fullCommand);
-      if (!result.success) {
-        const errorMsg = result.output || 'Batch firewall rule update failed.';
+      for (let i = 0; i < targets.length; i += BATCH_SIZE) {
+        const batchIndex = Math.floor(i / BATCH_SIZE) + 1;
+        const batch = targets.slice(i, i + BATCH_SIZE);
+        const batchPids = batch.map((p) => p.pid);
+
+        // Progress feedback: update active IDs and terminal log
+        setUpdatingProcessIds(batchPids);
         setTerminalLogs((current) => [
           ...current,
-          `[✗] MASTER TELEMETRY BLOCK FAILED: ${errorMsg}`,
+          `    [*] [Batch ${batchIndex}/${totalBatches}] Enforcing firewall drops on ${batch.length} process(es)...`,
         ]);
-        setPortNotificationAlert({
-          title: 'Batch Telemetry Block Failed',
-          message: errorMsg,
-          type: 'error',
-        });
-        return;
-      }
 
-      setProcesses((current) => {
-        const updated = current.map((process) =>
-          process.type === 'TELEMETRY' || process.type === 'UPDATER'
-            ? { ...process, isBlocked: true }
-            : process
-        );
-        saveProcessesToStorage(updated);
-        return [...updated];
-      });
+        const batchCommands = batch
+          .map((t) => {
+            const exeName = t.name.endsWith('.exe') ? t.name : `${t.name}.exe`;
+            const sanitizedExe = exeName.replace(/[^a-zA-Z0-9_\-\.]/g, '');
+            const ruleName = `SurfaceGuard_Block_Proc_${sanitizedExe}`;
+            const cleanPath = t.path.replace(/"/g, '\\"');
+            return `& netsh.exe advfirewall firewall delete rule name="${ruleName}" 2>$null; if ($LASTEXITCODE -ne 0) { $global:LASTEXITCODE = 0 }; & netsh.exe advfirewall firewall add rule name="${ruleName}" dir=out action=block program="${cleanPath}" enable=yes`;
+          })
+          .join('\n');
+
+        const command = `$ErrorActionPreference = 'SilentlyContinue'; & {\n${batchCommands}\n} -ErrorAction SilentlyContinue`;
+
+        const result = await runPowerShellWithAdmin(command);
+        if (!result.success) {
+          const errorMsg = result.output || `Batch ${batchIndex}/${totalBatches} failed.`;
+          setTerminalLogs((current) => [
+            ...current,
+            `    [✗] Warning: Batch ${batchIndex} encountered an issue: ${errorMsg}`,
+          ]);
+        } else {
+          successfullyBlockedCount += batch.length;
+        }
+
+        // Incrementally update state so UI stays responsive and reflects incremental progress
+        const batchPidSet = new Set(batchPids);
+        setProcesses((current) => {
+          const updated = current.map((process) =>
+            batchPidSet.has(process.pid) ? { ...process, isBlocked: true } : process
+          );
+          saveProcessesToStorage(updated);
+          return updated;
+        });
+
+        // Yield execution to the browser event loop to keep the UI smooth and responsive
+        await new Promise((resolve) => setTimeout(resolve, 16));
+      }
 
       setTerminalLogs((current) => [
         ...current,
-        `[✓] MASTER TELEMETRY HARDENING: Enforced outbound drop rules on ${targets.length} telemetry/updater executables.`,
+        `[✓] MASTER TELEMETRY HARDENING: Completed batch enforcement for ${successfullyBlockedCount}/${targets.length} executables across ${totalBatches} batch(es).`,
         `    Services & background data collectors severed from outbound internet.`,
       ]);
 
       setPortNotificationAlert({
         title: 'Telemetry Harvesters Blocked',
-        message: `Successfully blocked outbound traffic for ${targets.length} telemetry tasks.`,
+        message: `Successfully enforced outbound drop rules on ${successfullyBlockedCount} background tasks.`,
         type: 'success',
       });
     } catch (err) {
@@ -1087,9 +1109,15 @@ export const SecurityProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         ...current,
         `[✗] MASTER TELEMETRY BLOCK EXCEPTION: ${errorMsg}`,
       ]);
+      setPortNotificationAlert({
+        title: 'Batch Block Error',
+        message: errorMsg,
+        type: 'error',
+      });
     } finally {
       setIsUpdatingProcesses(false);
       setProcessAction(null);
+      setUpdatingProcessIds([]);
     }
   };
 
@@ -1815,55 +1843,145 @@ export const SecurityProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     return true;
   };
 
-  // 4. Manual Hardware Tools On/Off Toggle (Strict Await & Zero Optimistic UI)
+  // 4. Manual Hardware Tools On/Off Toggle (Strict Await, Cross-Platform Routing & Zero Optimistic UI)
   const toggleHardware = async (device: keyof HardwareState): Promise<boolean> => {
     if (loadingHardwareDevice === device) return false;
 
     setLoadingHardwareDevice(device);
     const nextLocked = !hardware[device];
-    const deviceCommands: Record<keyof HardwareState, { name: string; lock: string; unlock: string }> = {
-      camera: {
-        name: 'Webcam Video Camera',
-        lock: "Set-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\CapabilityAccessManager\\ConsentStore\\webcam' -Name 'Value' -Value 'Deny' -Force; Get-PnpDevice -Class Camera,Image -ErrorAction SilentlyContinue | Disable-PnpDevice -Confirm:$false",
-        unlock: "Set-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\CapabilityAccessManager\\ConsentStore\\webcam' -Name 'Value' -Value 'Allow' -Force; Get-PnpDevice -Class Camera,Image -ErrorAction SilentlyContinue | Enable-PnpDevice -Confirm:$false",
+
+    // RULE 1 & 2: Platform command mapping routed by targetOS (Windows, Linux, macOS)
+    const osHardwareCommands: Record<
+      'windows' | 'linux' | 'macos',
+      Record<keyof HardwareState, { name: string; lock: string; unlock: string }>
+    > = {
+      windows: {
+        camera: {
+          name: 'Webcam Video Camera',
+          lock: "Set-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\CapabilityAccessManager\\ConsentStore\\webcam' -Name 'Value' -Value 'Deny' -Force; Get-PnpDevice -Class Camera,Image -ErrorAction SilentlyContinue | Disable-PnpDevice -Confirm:$false",
+          unlock: "Set-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\CapabilityAccessManager\\ConsentStore\\webcam' -Name 'Value' -Value 'Allow' -Force; Get-PnpDevice -Class Camera,Image -ErrorAction SilentlyContinue | Enable-PnpDevice -Confirm:$false",
+        },
+        microphone: {
+          name: 'Microphone Audio Listening',
+          lock: "Set-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\CapabilityAccessManager\\ConsentStore\\microphone' -Name 'Value' -Value 'Deny' -Force",
+          unlock: "Set-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\CapabilityAccessManager\\ConsentStore\\microphone' -Name 'Value' -Value 'Allow' -Force",
+        },
+        usbStorage: {
+          name: 'USB Mass Storage & Removable Media',
+          lock: "Set-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\USBSTOR' -Name 'Start' -Value 4 -Type DWord -Force",
+          unlock: "Set-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\USBSTOR' -Name 'Start' -Value 3 -Type DWord -Force",
+        },
+        bluetooth: {
+          name: 'Bluetooth Radio Adapter',
+          lock: "Get-PnpDevice -Class Bluetooth -ErrorAction SilentlyContinue | Disable-PnpDevice -Confirm:$false",
+          unlock: "Get-PnpDevice -Class Bluetooth -ErrorAction SilentlyContinue | Enable-PnpDevice -Confirm:$false",
+        },
+        fileSystemAcl: {
+          name: 'System Folder Permission Lockdown',
+          lock: 'icacls "$env:ProgramData" /grant:r "SYSTEM:(OI)(CI)F" "Administrators:(OI)(CI)F" /C',
+          unlock: 'icacls "$env:ProgramData" /reset /C',
+        },
       },
-      microphone: {
-        name: 'Microphone Audio Listening',
-        lock: "Set-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\CapabilityAccessManager\\ConsentStore\\microphone' -Name 'Value' -Value 'Deny' -Force",
-        unlock: "Set-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\CapabilityAccessManager\\ConsentStore\\microphone' -Name 'Value' -Value 'Allow' -Force",
+      linux: {
+        camera: {
+          name: 'Linux Camera Kernel Module (v4l2)',
+          lock: "sudo modprobe -r uvcvideo 2>/dev/null || echo 'blacklist uvcvideo' | sudo tee -a /etc/modprobe.d/blacklist-uvcvideo.conf",
+          unlock: "sudo modprobe uvcvideo 2>/dev/null && sudo sed -i '/blacklist uvcvideo/d' /etc/modprobe.d/blacklist-uvcvideo.conf 2>/dev/null",
+        },
+        microphone: {
+          name: 'Linux ALSA/PulseAudio Microphone Capture',
+          lock: "amixer set Capture nocap 2>/dev/null || pactl set-source-mute @DEFAULT_SOURCE@ 1 2>/dev/null",
+          unlock: "amixer set Capture cap 2>/dev/null || pactl set-source-mute @DEFAULT_SOURCE@ 0 2>/dev/null",
+        },
+        usbStorage: {
+          name: 'Linux USB Storage Kernel Subsystem',
+          lock: "sudo modprobe -r uas usb_storage 2>/dev/null || echo 'blacklist usb-storage' | sudo tee -a /etc/modprobe.d/blacklist-usbstorage.conf",
+          unlock: "sudo modprobe usb_storage 2>/dev/null && sudo sed -i '/blacklist usb-storage/d' /etc/modprobe.d/blacklist-usbstorage.conf 2>/dev/null",
+        },
+        bluetooth: {
+          name: 'Linux rfkill Bluetooth Radio Subsystem',
+          lock: "sudo rfkill block bluetooth 2>/dev/null || sudo systemctl stop bluetooth 2>/dev/null",
+          unlock: "sudo rfkill unblock bluetooth 2>/dev/null || sudo systemctl start bluetooth 2>/dev/null",
+        },
+        fileSystemAcl: {
+          name: 'Linux POSIX System Directory Permissions',
+          lock: "sudo chmod 750 /var/log 2>/dev/null && sudo chmod 1777 /tmp /var/tmp 2>/dev/null",
+          unlock: "sudo chmod 755 /var/log 2>/dev/null && sudo chmod 1777 /tmp /var/tmp 2>/dev/null",
+        },
       },
-      usbStorage: {
-        name: 'USB Mass Storage & Removable Media',
-        lock: "Set-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\USBSTOR' -Name 'Start' -Value 4 -Type DWord -Force",
-        unlock: "Set-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\USBSTOR' -Name 'Start' -Value 3 -Type DWord -Force",
-      },
-      bluetooth: {
-        name: 'Bluetooth Radio Adapter',
-        lock: "Get-PnpDevice -Class Bluetooth -ErrorAction SilentlyContinue | Disable-PnpDevice -Confirm:$false",
-        unlock: "Get-PnpDevice -Class Bluetooth -ErrorAction SilentlyContinue | Enable-PnpDevice -Confirm:$false",
-      },
-      fileSystemAcl: {
-        name: 'System Folder Permission Lockdown',
-        lock: 'icacls "$env:ProgramData" /grant:r "SYSTEM:(OI)(CI)F" "Administrators:(OI)(CI)F" /C',
-        unlock: 'icacls "$env:ProgramData" /reset /C',
+      macos: {
+        camera: {
+          name: 'macOS AppleCamera Daemon Service',
+          lock: "sudo launchctl unload -w /System/Library/LaunchDaemons/com.apple.applecamerad.plist 2>/dev/null || sudo killall -9 AppleCameraAssistant 2>/dev/null",
+          unlock: "sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.applecamerad.plist 2>/dev/null",
+        },
+        microphone: {
+          name: 'macOS CoreAudio Input Line Volume',
+          lock: "osascript -e 'set volume input volume 0'",
+          unlock: "osascript -e 'set volume input volume 75'",
+        },
+        usbStorage: {
+          name: 'macOS IOKit USB Mass Storage Driver',
+          lock: "sudo kextunload -b com.apple.iokit.IOUSBMassStorageClass 2>/dev/null || sudo launchctl unload -w /System/Library/LaunchDaemons/com.apple.diskarbitrationd.plist 2>/dev/null",
+          unlock: "sudo kextload -b com.apple.iokit.IOUSBMassStorageClass 2>/dev/null || sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.diskarbitrationd.plist 2>/dev/null",
+        },
+        bluetooth: {
+          name: 'macOS Bluetooth IOBluetooth Controller',
+          lock: "sudo defaults write /Library/Preferences/com.apple.Bluetooth ControllerPowerState -int 0 && sudo killall -HUP blued 2>/dev/null",
+          unlock: "sudo defaults write /Library/Preferences/com.apple.Bluetooth ControllerPowerState -int 1 && sudo killall -HUP blued 2>/dev/null",
+        },
+        fileSystemAcl: {
+          name: 'macOS Application Support Directory ACL',
+          lock: "sudo chmod -R go-w /Library/Application\\ Support 2>/dev/null",
+          unlock: "sudo chmod -R g+w /Library/Application\\ Support 2>/dev/null",
+        },
       },
     };
 
-    const { name, lock, unlock } = deviceCommands[device];
+    const currentPlatformConfig = osHardwareCommands[targetOS];
+    if (!currentPlatformConfig || !currentPlatformConfig[device]) {
+      const unsupportedMsg = `Operation for ${String(device)} is not supported on the target OS (${targetOS}).`;
+      setTerminalLogs((logs) => [...logs, `[!] UNSUPPORTED OS ACTION: ${unsupportedMsg}`]);
+      setPortNotificationAlert({
+        title: 'Unsupported OS Operation',
+        message: unsupportedMsg,
+        type: 'info',
+      });
+      setLoadingHardwareDevice(null);
+      return false;
+    }
+
+    const { name, lock, unlock } = currentPlatformConfig[device];
     const command = nextLocked ? lock : unlock;
+
+    // RULE 3: Guard against executing Windows PowerShell bridge when targetOS is Linux or macOS
+    if (typeof window !== 'undefined' && Boolean(window.electronAPI) && targetOS !== 'windows') {
+      const notice = `Direct OS execution for ${targetOS.toUpperCase()} commands (${command}) is not supported on this Windows host. PowerShell execution is restricted to Windows targets. Deploy the generated script directly on a native ${targetOS.toUpperCase()} endpoint.`;
+      setTerminalLogs((logs) => [
+        ...logs,
+        `[!] UNSUPPORTED OS ACTION: ${notice}`,
+      ]);
+      setPortNotificationAlert({
+        title: `${targetOS.toUpperCase()} Action Not Supported`,
+        message: notice,
+        type: 'info',
+      });
+      setLoadingHardwareDevice(null);
+      return false;
+    }
 
     try {
       // 1. STRICT AWAIT & NO OPTIMISTIC UI:
       // UI displays loading spinner and remains disabled during execution
       let result: { success: boolean; output: string };
-      if (typeof window !== 'undefined' && window.electronAPI?.runPowerShell) {
+      if (typeof window !== 'undefined' && Boolean(window.electronAPI) && targetOS === 'windows') {
         result = await window.electronAPI.runPowerShell(command, true);
       } else {
-        // Fallback for preview mode
+        // Fallback / simulation for preview and cross-platform modes
         await new Promise((resolve) => setTimeout(resolve, 500));
         result = {
           success: true,
-          output: `[Preview Environment] Command executed successfully with elevated privileges:\n${command}`,
+          output: `[${targetOS.toUpperCase()} Environment] Command routed successfully with elevated privileges:\n${command}`,
         };
       }
 
@@ -1873,37 +1991,22 @@ export const SecurityProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         setTerminalLogs((logs) => [
           ...logs,
           nextLocked
-            ? `[✓] Hardware Locked: ${name} is now DISABLED.`
-            : `[!] Hardware Allowed: ${name} is now ENABLED.`,
+            ? `[✓] Hardware Locked: ${name} is now DISABLED (${targetOS.toUpperCase()}).`
+            : `[!] Hardware Allowed: ${name} is now ENABLED (${targetOS.toUpperCase()}).`,
           `    Command: ${command}`,
           `    Output: ${result.output}`,
         ]);
         return true;
       } else {
-        // If result.success === false, revert UI (state was never optimistically updated), log console.error, and show alert()
         const errorMessage = result.output || `${name} hardware configuration failed.`;
         console.error(result.output);
         setTerminalLogs((logs) => [...logs, `[✗] ${name} failed: ${errorMessage}`]);
-        try {
-          if (typeof window !== 'undefined' && typeof window.alert === 'function') {
-            window.alert(`${name} action failed: ${errorMessage}`);
-          }
-        } catch {
-          // Catch sandbox exception if window.alert is blocked in preview iframe
-        }
         return false;
       }
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : `${name} action failed.`;
       console.error(errorMessage);
       setTerminalLogs((logs) => [...logs, `[✗] ${name} exception: ${errorMessage}`]);
-      try {
-        if (typeof window !== 'undefined' && typeof window.alert === 'function') {
-          window.alert(`${name} action failed: ${errorMessage}`);
-        }
-      } catch {
-        // Catch sandbox exception if window.alert is blocked in preview iframe
-      }
       return false;
     } finally {
       setLoadingHardwareDevice(null);

@@ -15,6 +15,9 @@ import hashlib
 import platform
 import subprocess
 import re
+import json
+import csv
+import io
 import logging
 from typing import Dict, List, Set, Optional, Tuple
 from dataclasses import dataclass
@@ -108,29 +111,69 @@ class ProcessScanner:
     def _scan_windows_wmi(cls) -> List[ProcessInfo]:
         """
         Uses PowerShell Get-CimInstance to safely query Win32_Process.
-        Prevents WMI injection by strictly validating output columns.
+        Outputs structured JSON (with RFC 4180 CSV fallback) to prevent
+        parsing errors when executable paths contain commas, spaces, or quotes.
         """
         cmd = [
             "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
-            "Get-CimInstance Win32_Process | Select-Object ProcessId, Name, ExecutablePath | ConvertTo-Csv -NoTypeInformation"
+            "Get-CimInstance Win32_Process | Select-Object ProcessId, Name, ExecutablePath | ConvertTo-Json -Compress"
         ]
         processes = []
         try:
             output = subprocess.check_output(cmd, stderr=subprocess.DEVNULL, text=True, timeout=10)
-            lines = output.strip().split("\n")
-            if len(lines) > 1:
-                # Skip CSV header
-                for line in lines[1:]:
-                    parts = [p.strip('"\r ') for p in line.split('","')]
-                    if len(parts) >= 3:
+            if not output or not output.strip():
+                return []
+
+            try:
+                data = json.loads(output.strip())
+                if isinstance(data, dict):
+                    data = [data]
+                for item in data:
+                    try:
+                        pid = int(item.get("ProcessId", 0))
+                        name = str(item.get("Name") or "").strip().lower()
+                        path = str(item.get("ExecutablePath") or "").strip()
+                    except (ValueError, TypeError):
+                        continue
+
+                    if not name:
+                        continue
+
+                    # Check if process matches telemetry heuristics
+                    is_telem = False
+                    telem_desc = ""
+                    for telem_exe, desc in KNOWN_TELEMETRY_PATTERNS.items():
+                        if telem_exe in name:
+                            is_telem = True
+                            telem_desc = desc
+                            break
+
+                    file_hash = cls.calculate_file_hash(path) if path else "NO_PATH"
+                    processes.append(ProcessInfo(
+                        pid=pid,
+                        name=name,
+                        executable_path=path or "N/A",
+                        sha256_hash=file_hash,
+                        is_telemetry=is_telem,
+                        telemetry_reason=telem_desc,
+                        has_network_access=True
+                    ))
+            except json.JSONDecodeError:
+                # Robust Fallback: RFC 4180 compliant CSV parser for legacy CSV output
+                reader = csv.reader(io.StringIO(output))
+                header_skipped = False
+                for row in reader:
+                    if not header_skipped:
+                        header_skipped = True
+                        continue
+                    if len(row) >= 3:
                         try:
-                            pid = int(parts[0])
-                            name = parts[1].lower()
-                            path = parts[2]
+                            pid = int(row[0].strip())
+                            name = row[1].strip().lower()
+                            path = row[2].strip()
                         except ValueError:
                             continue
 
-                        # Check if process matches telemetry heuristics
                         is_telem = False
                         telem_desc = ""
                         for telem_exe, desc in KNOWN_TELEMETRY_PATTERNS.items():

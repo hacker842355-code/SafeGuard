@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { X, Copy, Check, Download, FileText, CheckCircle2, Shield } from 'lucide-react';
+import React, { useState, useRef } from 'react';
+import { X, Copy, Check, Download, FileText, CheckCircle2, Shield, AlertCircle } from 'lucide-react';
 import { THREAT_ITEMS, PLATFORM_THREATS, ZERO_TRUST_PRINCIPLES } from '../data/threatData';
 
 interface ExecutiveReportModalProps {
@@ -9,6 +9,8 @@ interface ExecutiveReportModalProps {
 
 export const ExecutiveReportModal: React.FC<ExecutiveReportModalProps> = ({ isOpen, onClose }) => {
   const [copied, setCopied] = useState<boolean>(false);
+  const [copyFeedback, setCopyFeedback] = useState<string | null>(null);
+  const preRef = useRef<HTMLPreElement>(null);
 
   if (!isOpen) return null;
 
@@ -137,10 +139,53 @@ ${THREAT_ITEMS.map(
 
   const reportText = generateMarkdownReport();
 
-  const handleCopy = () => {
-    navigator.clipboard.writeText(reportText);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+  const handleCopy = async () => {
+    try {
+      if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+        await navigator.clipboard.writeText(reportText);
+        setCopied(true);
+        setCopyFeedback(null);
+        setTimeout(() => setCopied(false), 2000);
+      } else {
+        throw new Error('Clipboard API unavailable');
+      }
+    } catch (err) {
+      // Fallback 1: Legacy execCommand via temporary off-screen textarea
+      let fallbackSuccess = false;
+      try {
+        const textArea = document.createElement('textarea');
+        textArea.value = reportText;
+        textArea.style.position = 'fixed';
+        textArea.style.opacity = '0';
+        textArea.style.left = '-9999px';
+        document.body.appendChild(textArea);
+        textArea.focus();
+        textArea.select();
+        fallbackSuccess = document.execCommand('copy');
+        document.body.removeChild(textArea);
+      } catch (_) {
+        fallbackSuccess = false;
+      }
+
+      if (fallbackSuccess) {
+        setCopied(true);
+        setCopyFeedback(null);
+        setTimeout(() => setCopied(false), 2000);
+      } else {
+        // Fallback 2: Select report text manually in the DOM for manual Ctrl+C / Cmd+C
+        if (preRef.current) {
+          const selection = window.getSelection();
+          if (selection) {
+            const range = document.createRange();
+            range.selectNodeContents(preRef.current);
+            selection.removeAllRanges();
+            selection.addRange(range);
+          }
+        }
+        setCopyFeedback('Clipboard restricted: report selected — press Ctrl+C / Cmd+C to copy.');
+        setTimeout(() => setCopyFeedback(null), 5000);
+      }
+    }
   };
 
   const handleDownload = () => {
@@ -198,9 +243,17 @@ ${THREAT_ITEMS.map(
           </div>
         </div>
 
+        {/* Fallback Notice Banner if clipboard permissions fail */}
+        {copyFeedback && (
+          <div className="bg-amber-950/70 border-b border-amber-800/80 px-6 py-2 text-xs text-amber-200 flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 text-amber-400 shrink-0" />
+            <span>{copyFeedback}</span>
+          </div>
+        )}
+
         {/* Modal Content Scroll Area */}
         <div className="p-6 overflow-y-auto font-mono text-xs text-slate-300 bg-slate-950 leading-relaxed selection:bg-cyan-500/20">
-          <pre className="whitespace-pre-wrap">{reportText}</pre>
+          <pre ref={preRef} className="whitespace-pre-wrap">{reportText}</pre>
         </div>
       </div>
     </div>

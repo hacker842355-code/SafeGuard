@@ -114,6 +114,35 @@ public class ZeroTrustEdrEngine {
             return records;
         }
 
+        /**
+         * RFC 4180 compliant CSV parser.
+         * Correctly handles quoted fields containing commas, spaces, and escaped quotes
+         * (e.g. "C:\Users\John, Doe\AppData\...").
+         */
+        public static List<String> parseRfc4180Csv(String line) {
+            List<String> fields = new ArrayList<>();
+            StringBuilder sb = new StringBuilder();
+            boolean inQuotes = false;
+            for (int i = 0; i < line.length(); i++) {
+                char c = line.charAt(i);
+                if (c == '"') {
+                    if (inQuotes && i + 1 < line.length() && line.charAt(i + 1) == '"') {
+                        sb.append('"');
+                        i++; // Escaped quote ("")
+                    } else {
+                        inQuotes = !inQuotes;
+                    }
+                } else if (c == ',' && !inQuotes) {
+                    fields.add(sb.toString().trim());
+                    sb.setLength(0);
+                } else {
+                    sb.append(c);
+                }
+            }
+            fields.add(sb.toString().trim());
+            return fields;
+        }
+
         private static void scanWindowsProcesses(List<ProcessRecord> records) {
             // Uses PowerShell Get-CimInstance with explicit parameter tokens (no shell injection)
             ProcessBuilder pb = new ProcessBuilder(
@@ -133,12 +162,16 @@ public class ZeroTrustEdrEngine {
                             isHeader = false;
                             continue;
                         }
-                        String[] parts = line.replace("\"", "").split(",");
-                        if (parts.length >= 2) {
+                        if (line.trim().isEmpty()) {
+                            continue;
+                        }
+                        List<String> parts = parseRfc4180Csv(line);
+                        if (parts.size() >= 2) {
                             try {
-                                long pid = Long.parseLong(parts[0].trim());
-                                String name = parts[1].trim().toLowerCase();
-                                String path = parts.length > 2 ? parts[2].trim() : "N/A";
+                                long pid = Long.parseLong(parts.get(0).trim());
+                                String name = parts.get(1).trim().toLowerCase();
+                                String path = parts.size() > 2 ? parts.get(2).trim() : "N/A";
+                                if (path.isEmpty()) path = "N/A";
 
                                 boolean isTelem = false;
                                 String reason = "";
