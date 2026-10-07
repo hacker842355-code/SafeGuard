@@ -9,6 +9,16 @@ const { exec, execFile } = require('child_process');
 const fs = require('fs');
 const { parseWindowsListenerJson } = require('./windows-network.cjs');
 
+const isDev = !app.isPackaged;
+
+// In production, disable remote debugging flags and inspect ports
+if (!isDev) {
+  app.commandLine.removeSwitch('remote-debugging-port');
+  app.commandLine.removeSwitch('remote-debugging-pipe');
+  app.commandLine.removeSwitch('inspect');
+  app.commandLine.removeSwitch('inspect-brk');
+}
+
 let mainWindow;
 
 function createWindow() {
@@ -22,9 +32,11 @@ function createWindow() {
     title: 'SurfaceGuard Architect - Endpoint Security Studio',
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
+      webSecurity: true,
       nodeIntegration: false,
       contextIsolation: true,
       sandbox: true,
+      devTools: isDev,
     },
     autoHideMenuBar: true,
   };
@@ -35,10 +47,17 @@ function createWindow() {
 
   mainWindow = new BrowserWindow(windowConfig);
 
+  // Disable DevTools in production
+  if (!isDev) {
+    mainWindow.webContents.on('devtools-opened', () => {
+      mainWindow.webContents.closeDevTools();
+    });
+  }
+
   // Safe path using app.getAppPath() for packaged apps
   const indexPath = path.join(app.getAppPath(), 'dist/index.html');
 
-  if (app.isPackaged) {
+  if (!isDev) {
     mainWindow.loadFile(indexPath);
   } else {
     let devUrl = 'http://localhost:3000';

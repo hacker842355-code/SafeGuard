@@ -31,6 +31,7 @@
     "electron": "^44.4.5",
     "electron-builder": "^26.15.3",
     "esbuild": "^0.25.0",
+    "javascript-obfuscator": "^5.9.0",
     "tailwindcss": "^4.3.3",
     "tsx": "^4.21.0",
     "typescript": "^7.0.2"
@@ -38,9 +39,14 @@
   "build": {
     "appId": "com.surfaceguard.architect",
     "productName": "SurfaceGuard Architect",
+    "asar": true,
     "files": [
       "dist/**/*",
-      "desktop/**/*"
+      "desktop/**/*",
+      "!scripts/**/*",
+      "!**/*.map",
+      "!**/*.bat",
+      "!**/*.cmd"
     ],
     "win": {
       "target": "nsis"
