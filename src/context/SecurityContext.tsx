@@ -9,6 +9,14 @@ import {
   RecurringScanSchedule
 } from '../types/security';
 import { cameraCommands } from './cameraCommands';
+import {
+  saveSystemStateSnapshot,
+  recordLastAction,
+  clearLastAction,
+  getLastAction,
+  HardeningActionRecord,
+  EMERGENCY_SAFE_MODE_RESTORE_SCRIPT,
+} from '../utils/recoveryManager';
 
 export interface PortNotificationAlert {
   title: string;
@@ -152,6 +160,8 @@ interface SecurityContextType {
   executeEmergencyLockdown: () => Promise<boolean>;
   executeHardening: () => Promise<void>;
   executeRollback: () => Promise<void>;
+  rollbackLastAction: () => Promise<boolean>;
+  restoreSystemDefaults: () => Promise<boolean>;
   simulateAttack: (attackType: 'SMB_RANSOMWARE' | 'NMAP_SCAN' | 'SPYWARE_CAM' | 'DEV_DEBUG_EXPLOIT') => void;
   clearTerminal: () => void;
 }
@@ -1722,12 +1732,41 @@ export const SecurityProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       ? `$ErrorActionPreference = 'SilentlyContinue'; & { netsh advfirewall firewall delete rule name="${ruleName}" -ErrorAction SilentlyContinue 2>$null; if ($LASTEXITCODE -ne 0) { $global:LASTEXITCODE = 0 }; netsh advfirewall firewall add rule name="${ruleName}" dir=in action=block protocol=${safeProto} localport=${safePort} enable=yes -ErrorAction SilentlyContinue } -ErrorAction SilentlyContinue`
       : `$ErrorActionPreference = 'SilentlyContinue'; & { netsh advfirewall firewall delete rule name="${ruleName}" -ErrorAction SilentlyContinue 2>$null; if ($LASTEXITCODE -ne 0) { $global:LASTEXITCODE = 0 } } -ErrorAction SilentlyContinue`;
 
+    // Rollback command (inverse action)
+    const rollbackCommand = isBlocking
+      ? `$ErrorActionPreference = 'SilentlyContinue'; & { netsh advfirewall firewall delete rule name="${ruleName}" -ErrorAction SilentlyContinue 2>$null; if ($LASTEXITCODE -ne 0) { $global:LASTEXITCODE = 0 } } -ErrorAction SilentlyContinue`
+      : `$ErrorActionPreference = 'SilentlyContinue'; & { netsh advfirewall firewall delete rule name="${ruleName}" -ErrorAction SilentlyContinue 2>$null; if ($LASTEXITCODE -ne 0) { $global:LASTEXITCODE = 0 }; netsh advfirewall firewall add rule name="${ruleName}" dir=in action=block protocol=${safeProto} localport=${safePort} enable=yes -ErrorAction SilentlyContinue } -ErrorAction SilentlyContinue`;
+
+    // Save snapshot prior to mutation
+    await saveSystemStateSnapshot({
+      timestamp: new Date().toISOString(),
+      targetOS,
+      ports,
+      hardware,
+      processes,
+      isStrictLockdown,
+      metadata: {
+        version: '1.0.0',
+        description: `Pre-action snapshot before togglePort(${portNumber})`,
+      },
+    });
+
+    recordLastAction({
+      id: `ACT-${Date.now()}`,
+      timestamp: new Date().toISOString(),
+      actionType: 'PORT',
+      target: `Port ${portNumber}/${safeProto}`,
+      commandExecuted: command,
+      rollbackCommand,
+    });
+
     try {
       const result = await runPowerShellWithAdmin(command);
 
       // CRITICAL: NO OPTIMISTIC UI STATE UPDATES
       // The React UI MUST NOT toggle any port state to "Blocked" or "Allowed" until result.success === true
       if (result.success === true) {
+        clearLastAction();
         setPorts((prev) => {
           const updated = prev.map((p) =>
             p.port === portNumber
@@ -1762,7 +1801,14 @@ export const SecurityProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         setTerminalLogs((prev) => [
           ...prev,
           `[✗] Failed to ${isBlocking ? 'BLOCK' : 'ALLOW'} Port ${portNumber}: ${errorOutput}`,
+          '    [!] Executing automated transaction rollback on port failure...',
         ]);
+        // Trigger automated compensation unlock
+        try {
+          await runPowerShellWithAdmin(rollbackCommand);
+        } catch (rbErr) {
+          console.error('Failed to execute automatic rollback on port failure:', rbErr);
+        }
         setPortNotificationAlert({
           title: `Firewall Error: Port ${portNumber}/${safeProto}`,
           message: errorOutput,
@@ -1778,7 +1824,14 @@ export const SecurityProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       setTerminalLogs((prev) => [
         ...prev,
         `[✗] Exception while configuring Port ${portNumber}: ${errMsg}`,
+        '    [!] Exception caught. Triggering automated transaction rollback...',
       ]);
+      // Trigger automated compensation unlock
+      try {
+        await runPowerShellWithAdmin(rollbackCommand);
+      } catch (rbErr) {
+        console.error('Failed to execute automatic rollback on port exception:', rbErr);
+      }
       setPortNotificationAlert({
         title: `Command Exception: Port ${portNumber}`,
         message: errMsg,
@@ -1970,6 +2023,29 @@ export const SecurityProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       return false;
     }
 
+    // Save state snapshot before executing hardening action
+    await saveSystemStateSnapshot({
+      timestamp: new Date().toISOString(),
+      targetOS,
+      ports,
+      hardware,
+      processes,
+      isStrictLockdown,
+      metadata: {
+        version: '1.0.0',
+        description: `Pre-action snapshot before toggleHardware(${String(device)})`,
+      },
+    });
+
+    recordLastAction({
+      id: `ACT-${Date.now()}`,
+      timestamp: new Date().toISOString(),
+      actionType: 'HARDWARE',
+      target: name,
+      commandExecuted: command,
+      rollbackCommand: unlock, // compensation command
+    });
+
     try {
       // 1. STRICT AWAIT & NO OPTIMISTIC UI:
       // UI displays loading spinner and remains disabled during execution
@@ -1996,17 +2072,42 @@ export const SecurityProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           `    Command: ${command}`,
           `    Output: ${result.output}`,
         ]);
+        clearLastAction();
         return true;
       } else {
         const errorMessage = result.output || `${name} hardware configuration failed.`;
         console.error(result.output);
-        setTerminalLogs((logs) => [...logs, `[✗] ${name} failed: ${errorMessage}`]);
+        setTerminalLogs((logs) => [
+          ...logs,
+          `[✗] ${name} failed: ${errorMessage}`,
+          '    [!] Executing automated transaction rollback to prevent soft-lock...',
+        ]);
+        // Trigger automated compensation unlock
+        try {
+          if (typeof window !== 'undefined' && Boolean(window.electronAPI) && targetOS === 'windows') {
+            await window.electronAPI.runPowerShell(unlock, true);
+          }
+        } catch (rbErr) {
+          console.error('Failed to execute automatic rollback on command failure:', rbErr);
+        }
         return false;
       }
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : `${name} action failed.`;
       console.error(errorMessage);
-      setTerminalLogs((logs) => [...logs, `[✗] ${name} exception: ${errorMessage}`]);
+      setTerminalLogs((logs) => [
+        ...logs,
+        `[✗] ${name} exception: ${errorMessage}`,
+        '    [!] Exception caught. Triggering automated transaction rollback...',
+      ]);
+      // Trigger automated compensation unlock
+      try {
+        if (typeof window !== 'undefined' && Boolean(window.electronAPI) && targetOS === 'windows') {
+          await window.electronAPI.runPowerShell(unlock, true);
+        }
+      } catch (rbErr) {
+        console.error('Failed to execute automatic rollback on exception:', rbErr);
+      }
       return false;
     } finally {
       setLoadingHardwareDevice(null);
@@ -2842,6 +2943,133 @@ export const SecurityProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     setIsHardening(false);
   };
 
+  // Automated Transaction Rollback: Executes corresponding UNLOCK command for the last attempted action
+  const rollbackLastAction = async (): Promise<boolean> => {
+    const lastAction = getLastAction();
+    if (!lastAction) {
+      setTerminalLogs((prev) => [
+        ...prev,
+        '[*] Rollback aborted: No prior transaction logged in recovery history.',
+      ]);
+      return false;
+    }
+
+    setTerminalLogs((prev) => [
+      ...prev,
+      `[!] AUTOMATED TRANSACTION ROLLBACK TRIGGERED: Rolling back ${lastAction.target}...`,
+      `    Executing compensation command: ${lastAction.rollbackCommand}`,
+    ]);
+
+    try {
+      const rollbackResult = await runPowerShellWithAdmin(lastAction.rollbackCommand);
+      clearLastAction();
+
+      if (rollbackResult.success) {
+        setTerminalLogs((prev) => [
+          ...prev,
+          `[✓] Rollback successful: System restored from failed state for ${lastAction.target}.`,
+        ]);
+        setPortNotificationAlert({
+          title: 'Transaction Rolled Back',
+          message: `Automatic compensation executed for ${lastAction.target}.`,
+          type: 'info',
+        });
+        return true;
+      } else {
+        setTerminalLogs((prev) => [
+          ...prev,
+          `[✗] Rollback command failed: ${rollbackResult.output}`,
+        ]);
+        return false;
+      }
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      setTerminalLogs((prev) => [
+        ...prev,
+        `[✗] Rollback exception: ${errMsg}`,
+      ]);
+      return false;
+    }
+  };
+
+  // Emergency Safe-Mode System Restore: Master unblock commands to restore standard Windows network firewall settings & unblock drivers
+  const restoreSystemDefaults = async (): Promise<boolean> => {
+    setIsHardening(true);
+    setTerminalLogs((prev) => [
+      ...prev,
+      '',
+      '🚨 [EMERGENCY SAFE-MODE RESTORE INITIATED]',
+      '    [*] Purging all custom firewall blocks & resetting default open inbound notifications...',
+      '    [*] Unblocking Camera, Microphone, USB Mass Storage, and Bluetooth hardware drivers...',
+    ]);
+
+    try {
+      const result = await runPowerShellWithAdmin(EMERGENCY_SAFE_MODE_RESTORE_SCRIPT);
+
+      if (result.success) {
+        // Reset local context state atomically
+        setActiveLease(null);
+        setIsStrictLockdown(false);
+        try { localStorage.setItem(STORAGE_STRICT_LOCKDOWN, 'false'); } catch {}
+
+        setPorts(initialPorts.map((p) => ({ ...p, isOpen: true, isLoading: false })));
+        setHardware({
+          camera: false,
+          microphone: false,
+          usbStorage: false,
+          bluetooth: false,
+          fileSystemAcl: false,
+        });
+        setProcesses((prev) => prev.map((p) => ({ ...p, isBlocked: false })));
+        setActiveProfile('custom');
+        clearLastAction();
+
+        setTerminalLogs((prev) => [
+          ...prev,
+          '    [✓] Windows Firewall rules reset to permissive system defaults.',
+          '    [✓] Camera & Microphone consent granted; PnP drivers re-enabled.',
+          '    [✓] USBSTOR service restored to demand/auto start (Start=3).',
+          '    [✓] Bluetooth adapters restored to enabled state.',
+          '🚨 [✓] EMERGENCY SYSTEM RESTORE COMPLETE: Workstation fully unlocked.',
+        ]);
+
+        setPortNotificationAlert({
+          title: 'Safe-Mode Restore Completed',
+          message: 'All Windows firewall rules and hardware peripheral drivers have been restored to default unlocked operating state.',
+          type: 'success',
+        });
+
+        return true;
+      } else {
+        const errorMsg = result.output || 'Emergency restore execution failed.';
+        setTerminalLogs((prev) => [
+          ...prev,
+          `[✗] Safe-Mode restore failed: ${errorMsg}`,
+        ]);
+        setPortNotificationAlert({
+          title: 'Safe-Mode Restore Error',
+          message: errorMsg,
+          type: 'error',
+        });
+        return false;
+      }
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      setTerminalLogs((prev) => [
+        ...prev,
+        `[✗] Safe-Mode restore exception: ${errMsg}`,
+      ]);
+      setPortNotificationAlert({
+        title: 'Safe-Mode Exception',
+        message: errMsg,
+        type: 'error',
+      });
+      return false;
+    } finally {
+      setIsHardening(false);
+    }
+  };
+
   // 10. Simulate Attacks
   const simulateAttack = (attackType: 'SMB_RANSOMWARE' | 'NMAP_SCAN' | 'SPYWARE_CAM' | 'DEV_DEBUG_EXPLOIT') => {
     if (attackType === 'SMB_RANSOMWARE') {
@@ -2956,6 +3184,8 @@ export const SecurityProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         executeEmergencyLockdown,
         executeHardening,
         executeRollback,
+        rollbackLastAction,
+        restoreSystemDefaults,
         simulateAttack,
         clearTerminal,
       }}

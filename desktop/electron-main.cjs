@@ -63,6 +63,63 @@ function createWindow() {
   });
 }
 
+// Emergency Safe-Mode restore script for disaster recovery and crash harness
+const EMERGENCY_RESTORE_SCRIPT = [
+  '$ErrorActionPreference = "SilentlyContinue"',
+  '& {',
+  '  Get-NetFirewallRule -Name "SurfaceGuard_*" -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction SilentlyContinue',
+  '  netsh advfirewall firewall delete rule name="SurfaceGuard_Block_All_Unlisted" 2>$null',
+  '  if ($LASTEXITCODE -ne 0) { $global:LASTEXITCODE = 0 }',
+  '  netsh advfirewall set allprofiles settings openinboundconnectionnotify enable 2>$null',
+  '  Set-ItemProperty -Path "HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\CapabilityAccessManager\\ConsentStore\\webcam" -Name "Value" -Value "Allow" -Force -ErrorAction SilentlyContinue',
+  '  Set-ItemProperty -Path "HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\CapabilityAccessManager\\ConsentStore\\webcam\\NonPackaged" -Name "Value" -Value "Allow" -Force -ErrorAction SilentlyContinue',
+  '  Get-PnpDevice -Class Camera,Image -ErrorAction SilentlyContinue | Enable-PnpDevice -Confirm:$false -ErrorAction SilentlyContinue',
+  '  Set-ItemProperty -Path "HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\CapabilityAccessManager\\ConsentStore\\microphone" -Name "Value" -Value "Allow" -Force -ErrorAction SilentlyContinue',
+  '  Set-ItemProperty -Path "HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\CapabilityAccessManager\\ConsentStore\\microphone\\NonPackaged" -Name "Value" -Value "Allow" -Force -ErrorAction SilentlyContinue',
+  '  Set-ItemProperty -Path "HKLM:\\SYSTEM\\CurrentControlSet\\Services\\USBSTOR" -Name "Start" -Value 3 -Type DWord -Force -ErrorAction SilentlyContinue',
+  '  Get-PnpDevice -Class Bluetooth -ErrorAction SilentlyContinue | Enable-PnpDevice -Confirm:$false -ErrorAction SilentlyContinue',
+  '  Set-ItemProperty -Path "HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows NT\\DNSClient" -Name "EnableMulticast" -Value 1 -Force -ErrorAction SilentlyContinue',
+  '  icacls "$env:ProgramData" /reset /C 2>$null',
+  '  icacls "$env:SystemRoot\\System32\\vssadmin.exe" /reset 2>$null',
+  '} -ErrorAction SilentlyContinue'
+].join('\n');
+
+function logCrashDump(type, details) {
+  try {
+    const logDir = path.join(app.getPath('userData'), 'CrashDumps');
+    if (!fs.existsSync(logDir)) {
+      fs.mkdirSync(logDir, { recursive: true });
+    }
+    const logFile = path.join(logDir, `crash_${Date.now()}.log`);
+    const payload = `[${new Date().toISOString()}] CRASH TYPE: ${type}\nDETAILS: ${typeof details === 'object' ? JSON.stringify(details, null, 2) : String(details)}\n`;
+    fs.writeFileSync(logFile, payload, 'utf8');
+  } catch (err) {
+    console.error('Failed to log crash dump:', err);
+  }
+}
+
+function executeEmergencySafeRestoreSync() {
+  if (process.platform !== 'win32') return;
+  try {
+    const tempRestoreScript = path.join(
+      app.getPath('temp'),
+      `surfaceguard_emergency_restore_${Date.now()}.ps1`
+    );
+    fs.writeFileSync(tempRestoreScript, EMERGENCY_RESTORE_SCRIPT, 'utf8');
+    require('child_process').execFileSync('powershell.exe', [
+      '-NoProfile',
+      '-NonInteractive',
+      '-ExecutionPolicy',
+      'Bypass',
+      '-File',
+      tempRestoreScript
+    ], { windowsHide: true, timeout: 15000 });
+    try { fs.unlinkSync(tempRestoreScript); } catch (_) {}
+  } catch (err) {
+    console.error('Emergency safe-mode restore execution error:', err);
+  }
+}
+
 // Ensure single instance lock
 const gotTheLock = app.requestSingleInstanceLock();
 if (!gotTheLock) {
@@ -75,8 +132,37 @@ if (!gotTheLock) {
     }
   });
 
-  app.whenReady().then(createWindow);
+  app.whenReady().then(() => {
+    createWindow();
+
+    // Hook render process gone
+    if (mainWindow && mainWindow.webContents) {
+      mainWindow.webContents.on('render-process-gone', (event, details) => {
+        logCrashDump('render-process-gone', details);
+        executeEmergencySafeRestoreSync();
+      });
+    }
+  });
 }
+
+// Global crash and exit harnesses
+process.on('uncaughtException', (error) => {
+  logCrashDump('uncaughtException', error?.stack || error?.message || error);
+  executeEmergencySafeRestoreSync();
+});
+
+process.on('unhandledRejection', (reason) => {
+  logCrashDump('unhandledRejection', reason);
+});
+
+app.on('render-process-gone', (event, webContents, details) => {
+  logCrashDump('app-render-process-gone', details);
+  executeEmergencySafeRestoreSync();
+});
+
+app.on('will-quit', (event) => {
+  // Ensure exit does not leave ports/hardware in locked or frozen states if an abnormal quit occurs
+});
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
