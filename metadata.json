@@ -1,5 +1,5 @@
 {
-  "name": "Hardening Architect - Cross-Platform Security Studio",
+  "name": "surfaceguard-architect",
   "description": "Enterprise cross-platform automated attack surface reduction, threat modeling studio, and Zero-Trust system hardening platform for Windows, Linux, and macOS.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]

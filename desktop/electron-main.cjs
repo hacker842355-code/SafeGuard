@@ -12,14 +12,14 @@ const { parseWindowsListenerJson } = require('./windows-network.cjs');
 let mainWindow;
 
 function createWindow() {
-  mainWindow = new BrowserWindow({
+  const iconPath = path.join(__dirname, 'icon.ico');
+  const windowConfig = {
     width: 1440,
     height: 900,
     minWidth: 1024,
     minHeight: 700,
     backgroundColor: '#020617', // slate-950
     title: 'SurfaceGuard Architect - Endpoint Security Studio',
-    icon: path.join(__dirname, 'icon.ico'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       nodeIntegration: false,
@@ -27,7 +27,13 @@ function createWindow() {
       sandbox: true,
     },
     autoHideMenuBar: true,
-  });
+  };
+
+  if (fs.existsSync(iconPath)) {
+    windowConfig.icon = iconPath;
+  }
+
+  mainWindow = new BrowserWindow(windowConfig);
 
   // Safe path using app.getAppPath() for packaged apps
   const indexPath = path.join(app.getAppPath(), 'dist/index.html');
@@ -35,7 +41,16 @@ function createWindow() {
   if (app.isPackaged) {
     mainWindow.loadFile(indexPath);
   } else {
-    const devUrl = process.env.VITE_DEV_SERVER_URL || 'http://localhost:3000';
+    let devUrl = 'http://localhost:3000';
+    try {
+      const candidateUrl = (process.env.VITE_DEV_SERVER_URL || '').trim();
+      if (candidateUrl) {
+        devUrl = new URL(candidateUrl).href;
+      }
+    } catch {
+      devUrl = 'http://localhost:3000';
+    }
+
     if (fs.existsSync(indexPath)) {
       mainWindow.loadFile(indexPath);
     } else {
