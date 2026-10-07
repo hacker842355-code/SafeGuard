@@ -57,13 +57,13 @@ export function buildHardeningScript(params: ScriptGeneratorParams): string {
     blockedProcesses.forEach((proc) => {
       const exe = proc.name.endsWith('.exe') ? proc.name : `${proc.name}.exe`;
       const ruleName = `SurfaceGuard_Block_Proc_${exe}`;
-      const safePath = proc.path.replace(/'/g, "''");
+      const safePath = proc.path.replace(/"/g, '\\"');
       procLines.push(
         `# Outbound Drop for ${exe}`,
         `Write-Host "    [-] Severing outbound internet for ${exe}..." -ForegroundColor DarkGray`,
-        `netsh advfirewall firewall delete rule name='${ruleName}' 2>$null`,
+        `netsh advfirewall firewall delete rule name="${ruleName}" 2>$null`,
         'if ($LASTEXITCODE -ne 0) { $global:LASTEXITCODE = 0 }',
-        `netsh advfirewall firewall add rule name='${ruleName}' dir=out action=block program='${safePath}' enable=yes -ErrorAction SilentlyContinue`
+        `netsh advfirewall firewall add rule name="${ruleName}" dir=out action=block program="${safePath}" enable=yes -ErrorAction SilentlyContinue`
       );
     });
   } else {
@@ -116,7 +116,7 @@ export function buildHardeningScript(params: ScriptGeneratorParams): string {
     hwLines.push(
       '# File System ACL: Remove unauthenticated write privileges on %ProgramData%',
       'Write-Host "    [*] Hardening %ProgramData% ACL inheritance..." -ForegroundColor DarkGray',
-      'icacls "$env:ProgramData" /inheritance:r /grant:r "SYSTEM:(OI)(CI)F" "Administrators:(OI)(CI)F" /C /Q'
+      'icacls "$env:ProgramData" /grant:r "SYSTEM:(OI)(CI)F" "Administrators:(OI)(CI)F" /C /Q'
     );
   }
 
@@ -249,7 +249,7 @@ Get-PnpDevice -Class Bluetooth -ErrorAction SilentlyContinue | ForEach-Object {
 
 # 5. Restore File System ACL Defaults
 Write-Host "[5/5] Restoring %ProgramData% ACL inheritance defaults..." -ForegroundColor Cyan
-icacls "$env:ProgramData" /reset /T /C /Q
+icacls "$env:ProgramData" /reset /C /Q
 Write-Host "      [✓] ProgramData permissions reset to inherited defaults." -ForegroundColor DarkGray
 
 Write-Host ""
@@ -281,8 +281,8 @@ export function buildGpoIntuneScript(params: ScriptGeneratorParams): string {
     .map((proc) => {
       const exe = proc.name.endsWith('.exe') ? proc.name : `${proc.name}.exe`;
       const ruleName = `SurfaceGuard_Block_Proc_${exe}`;
-      const safePath = proc.path.replace(/'/g, "''");
-      return `netsh advfirewall firewall delete rule name='${ruleName}' 2>$null; if ($LASTEXITCODE -ne 0) { $global:LASTEXITCODE = 0 }; netsh advfirewall firewall add rule name='${ruleName}' dir=out action=block program='${safePath}' enable=yes -ErrorAction SilentlyContinue`;
+      const safePath = proc.path.replace(/"/g, '\\"');
+      return `netsh advfirewall firewall delete rule name="${ruleName}" 2>$null; if ($LASTEXITCODE -ne 0) { $global:LASTEXITCODE = 0 }; netsh advfirewall firewall add rule name="${ruleName}" dir=out action=block program="${safePath}" enable=yes -ErrorAction SilentlyContinue`;
     })
     .join('\n');
 
@@ -362,7 +362,7 @@ ${
 
 ${
   hardware.fileSystemAcl
-    ? 'icacls "$env:ProgramData" /inheritance:r /grant:r "SYSTEM:(OI)(CI)F" "Administrators:(OI)(CI)F" /C /Q'
+    ? 'icacls "$env:ProgramData" /grant:r "SYSTEM:(OI)(CI)F" "Administrators:(OI)(CI)F" /C /Q'
     : '# ACL hardening not restricted in baseline'
 }
 

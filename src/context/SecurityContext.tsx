@@ -27,6 +27,7 @@ export interface ActiveLease {
   totalSeconds: number;
   remainingSeconds: number;
   startedAt: string;
+  grantedAt?: string;
   expiresAt: string;
   affectedDevices?: (keyof HardwareState)[];
   affectedPorts?: number[];
@@ -1034,9 +1035,10 @@ export const SecurityProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     const commands = targets
       .map((t) => {
         const exeName = t.name.endsWith('.exe') ? t.name : `${t.name}.exe`;
-        const ruleName = `SurfaceGuard_Block_Proc_${exeName}`;
-        const safePath = t.path.replace(/'/g, "''");
-        return `netsh advfirewall firewall delete rule name='${ruleName}' -ErrorAction SilentlyContinue 2>$null; if ($LASTEXITCODE -ne 0) { $global:LASTEXITCODE = 0 }; netsh advfirewall firewall add rule name='${ruleName}' dir=out action=block program='${safePath}' enable=yes -ErrorAction SilentlyContinue`;
+        const sanitizedExe = exeName.replace(/[^a-zA-Z0-9_\-\.]/g, '');
+        const ruleName = `SurfaceGuard_Block_Proc_${sanitizedExe}`;
+        const cleanPath = t.path.replace(/"/g, '\\"');
+        return `netsh.exe advfirewall firewall delete rule name="${ruleName}" 2>$null; if ($LASTEXITCODE -ne 0) { $global:LASTEXITCODE = 0 }; netsh.exe advfirewall firewall add rule name="${ruleName}" dir=out action=block program="${cleanPath}" enable=yes`;
       })
       .join('; ');
 
@@ -1109,8 +1111,9 @@ export const SecurityProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     const commands = targets
       .map((t) => {
         const exeName = t.name.endsWith('.exe') ? t.name : `${t.name}.exe`;
-        const ruleName = `SurfaceGuard_Block_Proc_${exeName}`;
-        return `netsh advfirewall firewall delete rule name='${ruleName}' -ErrorAction SilentlyContinue 2>$null; if ($LASTEXITCODE -ne 0) { $global:LASTEXITCODE = 0 }`;
+        const sanitizedExe = exeName.replace(/[^a-zA-Z0-9_\-\.]/g, '');
+        const ruleName = `SurfaceGuard_Block_Proc_${sanitizedExe}`;
+        return `netsh.exe advfirewall firewall delete rule name="${ruleName}" 2>$null; if ($LASTEXITCODE -ne 0) { $global:LASTEXITCODE = 0 }`;
       })
       .join('; ');
 
@@ -1315,72 +1318,94 @@ export const SecurityProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   };
 
   // Background automated schedule watchdog effect
+  const scheduleConfigRef = useRef(scheduleConfig);
+  useEffect(() => {
+    scheduleConfigRef.current = scheduleConfig;
+  }, [scheduleConfig]);
+
   useEffect(() => {
     const timer = setInterval(() => {
-      setScheduleConfig((current) => {
-        if (!current.isEnabled) return current;
+      const config = scheduleConfigRef.current;
+      if (!config.isEnabled) return;
 
-        const now = Date.now();
+      const now = Date.now();
+      let triggered = false;
+      let isCalendar = false;
+      let logMsg = '';
 
-        // 1. Calendar scheduled date/time reached
-        if (current.scheduledDateTime) {
-          const targetTime = new Date(current.scheduledDateTime).getTime();
-          if (!isNaN(targetTime) && targetTime <= now) {
-            if (current.includePorts) scanPorts();
-            if (current.includeProcesses) scanProcesses();
-
-            setTerminalLogs((logs) => [
-              ...logs,
-              `[⏰] CALENDAR SCAN EXECUTED: Automated scan triggered for scheduled time ${new Date(targetTime).toLocaleTimeString()}.`,
-            ]);
-
-            return {
-              ...current,
-              scheduledDateTime: null,
-              lastRunTimestamp: now,
-              lastRunSummary: `Calendar scan executed at ${new Date(now).toLocaleTimeString()}`,
-              nextRunTimestamp: now + current.intervalMinutes * 60 * 1000,
-            };
-          }
+      // 1. Calendar scheduled date/time reached
+      if (config.scheduledDateTime) {
+        const targetTime = new Date(config.scheduledDateTime).getTime();
+        if (!isNaN(targetTime) && targetTime <= now) {
+          triggered = true;
+          isCalendar = true;
+          logMsg = `[⏰] CALENDAR SCAN EXECUTED: Automated scan triggered for scheduled time ${new Date(targetTime).toLocaleTimeString()}.`;
         }
+      }
 
-        // 2. Recurring interval countdown reached
-        if (current.nextRunTimestamp && current.nextRunTimestamp <= now) {
-          if (current.includePorts) scanPorts();
-          if (current.includeProcesses) scanProcesses();
+      // 2. Recurring interval countdown reached
+      if (!triggered && config.nextRunTimestamp && config.nextRunTimestamp <= now) {
+        triggered = true;
+        isCalendar = false;
+        logMsg = `[🔄] RECURRING SCAN EXECUTED: Completed automated ${config.intervalMinutes}-minute audit.`;
+      }
 
-          setTerminalLogs((logs) => [
-            ...logs,
-            `[🔄] RECURRING SCAN EXECUTED: Completed automated ${current.intervalMinutes}-minute audit.`,
-          ]);
+      if (triggered) {
+        // Pure state update: update timestamps and summary with NO side-effects
+        setScheduleConfig((prev) => ({
+          ...prev,
+          scheduledDateTime: isCalendar ? null : prev.scheduledDateTime,
+          lastRunTimestamp: now,
+          lastRunSummary: isCalendar
+            ? `Calendar scan executed at ${new Date(now).toLocaleTimeString()}`
+            : `Interval (${prev.intervalMinutes}m) scan at ${new Date(now).toLocaleTimeString()}`,
+          nextRunTimestamp: now + prev.intervalMinutes * 60 * 1000,
+        }));
 
-          return {
-            ...current,
-            lastRunTimestamp: now,
-            lastRunSummary: `Interval (${current.intervalMinutes}m) scan at ${new Date(now).toLocaleTimeString()}`,
-            nextRunTimestamp: now + current.intervalMinutes * 60 * 1000,
-          };
+        // Execute side-effects and async IPC scans outside the state updater callback
+        if (config.includePorts) {
+          scanPorts();
         }
-
-        return current;
-      });
+        if (config.includeProcesses) {
+          scanProcesses();
+        }
+        setTerminalLogs((logs) => [...logs, logMsg]);
+      }
     }, 1000);
 
     return () => clearInterval(timer);
   }, []);
 
   // Auto-lockdown watchdog effect for active lease (real-time countdown and auto-expiration)
+  const activeLeaseRef = useRef(activeLease);
+  useEffect(() => {
+    activeLeaseRef.current = activeLease;
+  }, [activeLease]);
+
   useEffect(() => {
     if (!activeLease) return;
 
     const timer = setInterval(() => {
-      setActiveLease((current) => {
-        if (!current) return null;
-        if (current.remainingSeconds <= 1) {
-          // Monotonic timer reached 00:00! Execute OS lock command and reset global state!
-          runPowerShellWithAdmin(current.lockCommand).catch(console.error);
+      const current = activeLeaseRef.current;
+      if (!current) {
+        clearInterval(timer);
+        return;
+      }
 
-          if (current.affectedDevices) {
+      // If lease expired, perform async IPC and state teardown OUTSIDE of state updater
+      if (current.remainingSeconds <= 1) {
+        clearInterval(timer);
+        activeLeaseRef.current = null;
+
+        // Perform async work and state updates outside functional updaters
+        (async () => {
+          try {
+            await runPowerShellWithAdmin(current.lockCommand);
+          } catch (err) {
+            console.error('Auto-lockdown OS command failed:', err);
+          }
+
+          if (current.affectedDevices && current.affectedDevices.length > 0) {
             setHardware((prev) => {
               const next = { ...prev };
               current.affectedDevices!.forEach((d) => {
@@ -1390,7 +1415,7 @@ export const SecurityProvider: React.FC<{ children: React.ReactNode }> = ({ chil
             });
           }
 
-          if (current.affectedPorts) {
+          if (current.affectedPorts && current.affectedPorts.length > 0) {
             setPorts((prev) =>
               prev.map((p) =>
                 current.affectedPorts!.includes(p.port) ? { ...p, isOpen: false } : p
@@ -1400,20 +1425,22 @@ export const SecurityProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
           const eventId = `LOG-${nextLedgerId.current++}`;
           const timestamp = timestampNow();
-          computeSha256(`${eventId}|${timestamp}|${current.shortName}|Timer expired auto-lockdown|00:00|EXPIRED`).then((hash) => {
-            setLeaseLedger((prev) => [
-              {
-                id: eventId,
-                timestamp,
-                app: current.shortName,
-                reason: `Lease expired automatically: ${current.reason}`,
-                duration: `${current.durationMinutes} min`,
-                status: 'EXPIRED',
-                hash,
-              },
-              ...prev,
-            ]);
-          });
+          const hash = await computeSha256(
+            `${eventId}|${timestamp}|${current.shortName}|Timer expired auto-lockdown|00:00|EXPIRED`
+          );
+
+          setLeaseLedger((prev) => [
+            {
+              id: eventId,
+              timestamp,
+              app: current.shortName,
+              reason: `Lease expired automatically: ${current.reason}`,
+              duration: `${current.durationMinutes} min`,
+              status: 'EXPIRED',
+              hash,
+            },
+            ...prev,
+          ]);
 
           setTerminalLogs((l) => [
             ...l,
@@ -1427,18 +1454,24 @@ export const SecurityProvider: React.FC<{ children: React.ReactNode }> = ({ chil
             type: 'info',
           });
 
-          return null;
-        }
+          setActiveLease(null);
+        })();
 
+        return;
+      }
+
+      // Pure state updater: only decrements remainingSeconds with no side-effects
+      setActiveLease((prev) => {
+        if (!prev) return null;
         return {
-          ...current,
-          remainingSeconds: current.remainingSeconds - 1,
+          ...prev,
+          remainingSeconds: Math.max(0, prev.remainingSeconds - 1),
         };
       });
     }, 1000);
 
     return () => clearInterval(timer);
-  }, [activeLease ? (activeLease.leaseId || `${activeLease.appId}_${activeLease.startedAt}`) : null]);
+  }, [activeLease?.appId, activeLease?.grantedAt, activeLease?.expiresAt]);
 
   // 1c. Master Control: "Strict Lockdown (Block All Unlisted Ports)"
   const toggleStrictLockdown = async () => {
@@ -1811,8 +1844,8 @@ export const SecurityProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       },
       fileSystemAcl: {
         name: 'System Folder Permission Lockdown',
-        lock: 'icacls "$env:ProgramData" /inheritance:r /grant:r "SYSTEM:(OI)(CI)F" "Administrators:(OI)(CI)F"',
-        unlock: 'icacls "$env:ProgramData" /reset /T /C',
+        lock: 'icacls "$env:ProgramData" /grant:r "SYSTEM:(OI)(CI)F" "Administrators:(OI)(CI)F" /C',
+        unlock: 'icacls "$env:ProgramData" /reset /C',
       },
     };
 
@@ -2076,6 +2109,7 @@ export const SecurityProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
       const totalSecs = params.durationMinutes * 60;
       const startedAt = new Date().toLocaleTimeString();
+      const grantedAt = startedAt;
       const expiresAt = new Date(Date.now() + totalSecs * 1000).toLocaleTimeString() + ' UTC';
       const uniqueLeaseId = `lease_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
@@ -2090,6 +2124,7 @@ export const SecurityProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         totalSeconds: totalSecs,
         remainingSeconds: totalSecs,
         startedAt,
+        grantedAt,
         expiresAt,
         affectedDevices,
         affectedPorts,
@@ -2416,7 +2451,7 @@ export const SecurityProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         Set-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\CapabilityAccessManager\\ConsentStore\\microphone' -Name 'Value' -Value 'Allow' -Force -ErrorAction SilentlyContinue
         Set-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\CapabilityAccessManager\\ConsentStore\\microphone\\NonPackaged' -Name 'Value' -Value 'Allow' -Force -ErrorAction SilentlyContinue
         Get-PnpDevice -Class Bluetooth -ErrorAction SilentlyContinue | Enable-PnpDevice -Confirm:$false -ErrorAction SilentlyContinue
-        icacls "$env:ProgramData" /reset /T /C 2>$null
+        icacls "$env:ProgramData" /reset /C 2>$null
         icacls "$env:SystemRoot\\System32\\vssadmin.exe" /reset 2>$null
         netsh advfirewall set allprofiles settings openinboundconnectionnotify enable 2>$null
       } -ErrorAction SilentlyContinue`;
